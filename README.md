@@ -31,6 +31,7 @@ This repo re-measures the gap on the **current toolchain** (`anchor-cli 0.32.1`,
 | W3b | Orderbook tick insert with 32-entry shift      | Active |
 | W4  | Matching engine place_order (2 mut accounts)   | Active |
 | W5  | Matching engine FIFO append into existing tick | Active |
+| W6  | 3-hop SPL Token CPI chain (Jupiter-route shape)| Active |
 
 ## Results
 
@@ -45,15 +46,20 @@ Measured 2026-06-06 on Anchor 0.32.1 / Pinocchio 0.11.1 / Solana 3.1.14 / litesv
 | W3b orderbook insert (+shift)  |     1,274 |          427 |  66.5%  |
 | W4 match engine empty book     |     1,318 |          141 |  89.3%  |
 | W5 match engine FIFO append    |     1,383 |          208 |  85.0%  |
+| W6 3-hop SPL Token CPI chain   |    10,045 |        3,431 |  65.8%  |
 
-The **absolute gap** between Anchor and Pinocchio is ~800–2,700 CU per instruction and is
-roughly independent of how much work the instruction does — it's pure framework overhead.
-Each additional mutable zero-copy account adds **~329 CU** to the gap: W3 (1 account) → 847 CU,
-W4/W5 (2 accounts) → 1,176 CU. A realistic 5-account lending refresh would compound to ~2,160 CU
-of pure overhead per call.
+**The gap follows two scaling laws, both linear:**
 
-See [`RESULTS.md`](RESULTS.md) for the per-account scaling analysis and the 6 invariants
-a solinv-style fuzzer would attach to a real Pinocchio rewrite of the matching engine.
+- **Per additional mutable account**: ~329 CU (W3 1-acct = 847, W4/W5 2-acct = 1,176).
+- **Per additional CPI hop**: ~1,968 CU (W2 1-hop = 2,677, W6 3-hop = 6,614).
+
+A realistic Jupiter route (3–5 hops): **~6,000–10,000 CU saved per swap** from CPI-wrapping
+overhead alone. A 5-account Kamino-style refresh: **~2,160 CU of pure framework overhead per call**.
+For protocols with hot paths called millions of times per day, this maps directly to user costs.
+
+See [`RESULTS.md`](RESULTS.md) for the scaling analysis, Token-2022 hook extrapolation, and
+the 6 invariants a solinv-style fuzzer would attach to a real Pinocchio rewrite of the
+matching engine.
 
 Binary sizes: Pinocchio `.so` files are 14–59× smaller than the Anchor equivalents.
 
@@ -82,11 +88,13 @@ pinocchio-bench/
 │   ├── anchor-w2-spl-cpi/      ← Anchor + anchor-spl transfer
 │   ├── anchor-w3-orderbook/    ← Anchor zero_copy + AccountLoader
 │   ├── anchor-w4-matching/     ← Anchor 2× AccountLoader (market + book)
+│   ├── anchor-w6-multihop/     ← Anchor 3× SPL Transfer CPI in one ix
 │   ├── pinocchio-w0-noop/      ← Pinocchio no-op
 │   ├── pinocchio-w1-write/     ← Pinocchio manual signer + write
 │   ├── pinocchio-w2-spl-cpi/   ← Pinocchio + pinocchio-token transfer
 │   ├── pinocchio-w3-orderbook/ ← Pinocchio raw-pointer cast
-│   └── pinocchio-w4-matching/  ← Pinocchio 2× raw cast (market + book)
+│   ├── pinocchio-w4-matching/  ← Pinocchio 2× raw cast (market + book)
+│   └── pinocchio-w6-multihop/  ← Pinocchio 3× pinocchio-token Transfer
 ├── bench/                     ← litesvm harness
 └── scripts/
     └── build.sh

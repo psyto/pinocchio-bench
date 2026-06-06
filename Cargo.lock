@@ -386,6 +386,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "anchor-w6-multihop"
+version = "0.1.0"
+dependencies = [
+ "anchor-lang",
+ "anchor-spl",
+]
+
+[[package]]
 name = "ansi_term"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2097,6 +2105,14 @@ name = "pinocchio-w4-matching"
 version = "0.1.0"
 dependencies = [
  "pinocchio",
+]
+
+[[package]]
+name = "pinocchio-w6-multihop"
+version = "0.1.0"
+dependencies = [
+ "pinocchio",
+ "pinocchio-token",
 ]
 
 [[package]]

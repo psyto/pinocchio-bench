@@ -19,6 +19,7 @@ Measured 2026-06-06 on:
 | W3b orderbook insert (+shift)| 1,274 |       427 |    847 | 66.5%  |
 | W4 match engine empty book   |  1,318 |       141 |  1,177 | 89.3%  |
 | W5 match engine FIFO append  |  1,383 |       208 |  1,175 | 85.0%  |
+| W6 3-hop SPL Token chain     | 10,045 |     3,431 |  6,614 | 65.8%  |
 
 ## Binary Size (on-chain `.so`)
 
@@ -29,6 +30,7 @@ Measured 2026-06-06 on:
 | W2 SPL Token transfer CPI    |        186,176 |             5,120 |   36×  |
 | W3 orderbook insert          |        175,528 |            10,248 |   17×  |
 | W4 matching engine           |        179,320 |            11,000 |   16×  |
+| W6 3-hop SPL Token chain     |        193,560 |             6,592 |   29×  |
 
 ## Notes on interpretation
 
@@ -82,6 +84,29 @@ The marginal cost of each additional `AccountLoader::load_mut` (Anchor) vs raw p
 `847 + 4 × 329 ≈ 2,160 CU` of pure framework overhead per call, before any useful work runs.
 
 That's the multi-account compounding the original framing predicted, measured.
+
+**W6 — CPI hops compound the same way.** W6 calls SPL Token's `Transfer` three times in a
+single router instruction (think Jupiter routing through 3 pools, or any multi-leg DeFi action).
+Comparing to W2 (single transfer):
+
+| Workload | CPI hops | Anchor CU | Pinocchio CU | Δ (gap) |
+| -------- | -------: | --------: | -----------: | ------: |
+| W2       |        1 |     3,856 |        1,179 |   2,677 |
+| W6       |        3 |    10,045 |        3,431 |   6,614 |
+
+Marginal cost per additional hop: **~1,968 CU on the Anchor side**, vs ~1,126 CU on the
+Pinocchio side. Each hop pays for `CpiContext::new` + 3× `to_account_info()` conversion +
+re-validation of the destination `Account<TokenAccount>` it just wrote to. Pinocchio's
+`pinocchio_token::Transfer::new().invoke()` skips all of that.
+
+Extrapolated to a typical Jupiter route (3–5 hops): **~6,000–10,000 CU saved per swap** just
+from CPI-wrapping overhead, before counting any additional pool-program-side framework cost.
+
+**Note on Token-2022.** This bench uses straight SPL Token, not Token-2022 with transfer hooks.
+If each hop's mint had a transfer hook (a user-defined program invoked CPI-on-CPI), each Anchor
+hook would add another full framework-overhead layer on top of the per-hop cost. The
+compounding multiplies: 3 hops × (transfer + hook) = 6 effective CPI hops worth of overhead.
+A Pinocchio rewrite of either the router *or* the hook recovers ~2k CU per layer it owns.
 
 ## What solinv would attach to W4/W5
 

@@ -14,11 +14,13 @@ const ANCHOR_W1: &str = "FLf2M1PEPVGXJFbwwPQg8REViTG6YpK4UoMCd22rsSey";
 const ANCHOR_W2: &str = "4fGGsS5fYeQ8VJfcR7eB2KNaYiYJvVEEqVC5t4EskB73";
 const ANCHOR_W3: &str = "7bTBRzPCg2tkq9vLHsKzPt5L8d3KYG7A1HuauwAKsGwV";
 const ANCHOR_W4: &str = "F84VDYJd5ukacECaHVkR6QJR1rD9nGmd2AJUw3qDvMN2";
+const ANCHOR_W6: &str = "258rXi3tqTFeWe7DkcheLPtFdpb2MzSDvHVBMERETFHR";
 const PINO_W0: &str = "4PE1tkJYXdvEXNFmqLfmu8kfLTUNVCQvMv6dGruZemfR";
 const PINO_W1: &str = "2jc9CyUhCbKjqL7WTwWc3pysWzgXPN4ucbf6PUGnparY";
 const PINO_W2: &str = "64QzbP8eZ47r61Hvjj9JL1yJW7uj7QLvbo8txCKh7pEK";
 const PINO_W3: &str = "6QPHxpcsV7nxHnpVUJhSiS2B32RhyS65LX1a2t1pbZLY";
 const PINO_W4: &str = "EZxAdAKQbnD6HZqchzuFdD3UZYVUeF5u7ffYj2pHPbc8";
+const PINO_W6: &str = "EKvrHm487HWbrgiWzmHKJRZq34n1V56tZnrwNzmPuaUg";
 const TOKEN_PROGRAM: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 
 const MINT_LEN: usize = 82;
@@ -84,11 +86,13 @@ fn load_programs(svm: &mut LiteSVM) {
         (ANCHOR_W2, "target/deploy/anchor_w2_spl_cpi.so"),
         (ANCHOR_W3, "target/deploy/anchor_w3_orderbook.so"),
         (ANCHOR_W4, "target/deploy/anchor_w4_matching.so"),
+        (ANCHOR_W6, "target/deploy/anchor_w6_multihop.so"),
         (PINO_W0, "target/deploy/pinocchio_w0_noop.so"),
         (PINO_W1, "target/deploy/pinocchio_w1_write.so"),
         (PINO_W2, "target/deploy/pinocchio_w2_spl_cpi.so"),
         (PINO_W3, "target/deploy/pinocchio_w3_orderbook.so"),
         (PINO_W4, "target/deploy/pinocchio_w4_matching.so"),
+        (PINO_W6, "target/deploy/pinocchio_w6_multihop.so"),
     ];
     for (id, path) in progs {
         svm.add_program_from_file(pk(id), path)
@@ -512,6 +516,95 @@ fn w4_pino(
     run_tx(svm, ix, &[payer])
 }
 
+// ---------- W6: 3-hop SPL Token CPI chain ----------
+//
+// One mint, three (source, dest) token-account pairs, all authority = payer.
+// Anchor side wraps each transfer in CpiContext::new + Account<TokenAccount>
+// validation on src/dst; Pinocchio side just hands the AccountView slices to
+// pinocchio_token::Transfer::new.
+
+fn setup_3hop_tokens(svm: &mut LiteSVM, authority: Pubkey) -> [Pubkey; 6] {
+    let mint = Keypair::new();
+    let token_pid = pk(TOKEN_PROGRAM);
+
+    svm.set_account(
+        mint.pubkey(),
+        SolAccount {
+            lamports: 1_500_000,
+            data: make_mint(&authority, 10_000_000, 6),
+            owner: token_pid,
+            executable: false,
+            rent_epoch: 0,
+        },
+    )
+    .unwrap();
+
+    let make_acc = |svm: &mut LiteSVM, amount: u64| -> Pubkey {
+        let kp = Keypair::new();
+        svm.set_account(
+            kp.pubkey(),
+            SolAccount {
+                lamports: 2_039_280,
+                data: make_token_account(&mint.pubkey(), &authority, amount),
+                owner: token_pid,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+        kp.pubkey()
+    };
+
+    let src1 = make_acc(svm, 10_000);
+    let dst1 = make_acc(svm, 0);
+    let src2 = make_acc(svm, 10_000);
+    let dst2 = make_acc(svm, 0);
+    let src3 = make_acc(svm, 10_000);
+    let dst3 = make_acc(svm, 0);
+
+    [src1, dst1, src2, dst2, src3, dst3]
+}
+
+fn w6_anchor(svm: &mut LiteSVM, payer: &Keypair) -> Result<u64, String> {
+    let [src1, dst1, src2, dst2, src3, dst3] = setup_3hop_tokens(svm, payer.pubkey());
+    let mut data = anchor_ix_disc("three_hop_transfer").to_vec();
+    data.extend_from_slice(&100u64.to_le_bytes());
+    let ix = Instruction {
+        program_id: pk(ANCHOR_W6),
+        accounts: vec![
+            AccountMeta::new_readonly(payer.pubkey(), true),
+            AccountMeta::new(src1, false),
+            AccountMeta::new(dst1, false),
+            AccountMeta::new(src2, false),
+            AccountMeta::new(dst2, false),
+            AccountMeta::new(src3, false),
+            AccountMeta::new(dst3, false),
+            AccountMeta::new_readonly(pk(TOKEN_PROGRAM), false),
+        ],
+        data,
+    };
+    run_tx(svm, ix, &[payer])
+}
+
+fn w6_pino(svm: &mut LiteSVM, payer: &Keypair) -> Result<u64, String> {
+    let [src1, dst1, src2, dst2, src3, dst3] = setup_3hop_tokens(svm, payer.pubkey());
+    let ix = Instruction {
+        program_id: pk(PINO_W6),
+        accounts: vec![
+            AccountMeta::new_readonly(payer.pubkey(), true),
+            AccountMeta::new(src1, false),
+            AccountMeta::new(dst1, false),
+            AccountMeta::new(src2, false),
+            AccountMeta::new(dst2, false),
+            AccountMeta::new(src3, false),
+            AccountMeta::new(dst3, false),
+            AccountMeta::new_readonly(pk(TOKEN_PROGRAM), false),
+        ],
+        data: 100u64.to_le_bytes().to_vec(),
+    };
+    run_tx(svm, ix, &[payer])
+}
+
 // ---------- driver ----------
 
 fn report(name: &str, a: Result<u64, String>, p: Result<u64, String>) {
@@ -574,6 +667,11 @@ fn main() {
     let a = w4_anchor(&mut svm, &payer, 16, 2, 800);
     let p = w4_pino(&mut svm, &payer, 16, 2, 800);
     report("W5 match FIFO append", a, p);
+
+    // W6: 3-hop SPL Token transfer chain (Jupiter-route-shaped)
+    let a = w6_anchor(&mut svm, &payer);
+    let p = w6_pino(&mut svm, &payer);
+    report("W6 3-hop SPL chain", a, p);
 
     println!();
 }
