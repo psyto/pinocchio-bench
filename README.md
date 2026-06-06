@@ -29,6 +29,8 @@ This repo re-measures the gap on the **current toolchain** (`anchor-cli 0.32.1`,
 | W2  | Signer check + SPL Token transfer CPI          | Active |
 | W3a | Orderbook tick insert into empty book          | Active |
 | W3b | Orderbook tick insert with 32-entry shift      | Active |
+| W4  | Matching engine place_order (2 mut accounts)   | Active |
+| W5  | Matching engine FIFO append into existing tick | Active |
 
 ## Results
 
@@ -41,12 +43,19 @@ Measured 2026-06-06 on Anchor 0.32.1 / Pinocchio 0.11.1 / Solana 3.1.14 / litesv
 | W2 SPL Token transfer CPI      |     3,856 |        1,179 |  69.4%  |
 | W3a orderbook insert (empty)   |       914 |           67 |  92.7%  |
 | W3b orderbook insert (+shift)  |     1,274 |          427 |  66.5%  |
+| W4 match engine empty book     |     1,318 |          141 |  89.3%  |
+| W5 match engine FIFO append    |     1,383 |          208 |  85.0%  |
 
 The **absolute gap** between Anchor and Pinocchio is ~800–2,700 CU per instruction and is
 roughly independent of how much work the instruction does — it's pure framework overhead.
-See [`RESULTS.md`](RESULTS.md) for the W3a-vs-W3b breakdown that shows this directly.
+Each additional mutable zero-copy account adds **~329 CU** to the gap: W3 (1 account) → 847 CU,
+W4/W5 (2 accounts) → 1,176 CU. A realistic 5-account lending refresh would compound to ~2,160 CU
+of pure overhead per call.
 
-Binary sizes: Pinocchio `.so` files are 17–59× smaller than the Anchor equivalents.
+See [`RESULTS.md`](RESULTS.md) for the per-account scaling analysis and the 6 invariants
+a solinv-style fuzzer would attach to a real Pinocchio rewrite of the matching engine.
+
+Binary sizes: Pinocchio `.so` files are 14–59× smaller than the Anchor equivalents.
 
 See [`RESULTS.md`](RESULTS.md) for methodology notes, caveats, and interpretation.
 
@@ -72,10 +81,12 @@ pinocchio-bench/
 │   ├── anchor-w1-write/        ← Anchor signer + state write
 │   ├── anchor-w2-spl-cpi/      ← Anchor + anchor-spl transfer
 │   ├── anchor-w3-orderbook/    ← Anchor zero_copy + AccountLoader
+│   ├── anchor-w4-matching/     ← Anchor 2× AccountLoader (market + book)
 │   ├── pinocchio-w0-noop/      ← Pinocchio no-op
 │   ├── pinocchio-w1-write/     ← Pinocchio manual signer + write
 │   ├── pinocchio-w2-spl-cpi/   ← Pinocchio + pinocchio-token transfer
-│   └── pinocchio-w3-orderbook/ ← Pinocchio raw-pointer cast
+│   ├── pinocchio-w3-orderbook/ ← Pinocchio raw-pointer cast
+│   └── pinocchio-w4-matching/  ← Pinocchio 2× raw cast (market + book)
 ├── bench/                     ← litesvm harness
 └── scripts/
     └── build.sh

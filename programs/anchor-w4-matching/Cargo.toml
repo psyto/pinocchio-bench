@@ -1,0 +1,21 @@
+[package]
+name = "anchor-w4-matching"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "anchor_w4_matching"
+
+[features]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+idl-build = ["anchor-lang/idl-build"]
+default = []
+
+[dependencies]
+anchor-lang = { workspace = true }
+bytemuck = { version = "1.17", features = ["derive", "min_const_generics"] }

@@ -17,6 +17,8 @@ Measured 2026-06-06 on:
 | W2 SPL Token transfer CPI    |  3,856 |     1,179 |  2,677 | 69.4%  |
 | W3a orderbook insert (empty) |    914 |        67 |    847 | 92.7%  |
 | W3b orderbook insert (+shift)| 1,274 |       427 |    847 | 66.5%  |
+| W4 match engine empty book   |  1,318 |       141 |  1,177 | 89.3%  |
+| W5 match engine FIFO append  |  1,383 |       208 |  1,175 | 85.0%  |
 
 ## Binary Size (on-chain `.so`)
 
@@ -26,6 +28,7 @@ Measured 2026-06-06 on:
 | W1 signer + state write      |        173,128 |             3,272 |   53×  |
 | W2 SPL Token transfer CPI    |        186,176 |             5,120 |   36×  |
 | W3 orderbook insert          |        175,528 |            10,248 |   17×  |
+| W4 matching engine           |        179,320 |            11,000 |   16×  |
 
 ## Notes on interpretation
 
@@ -64,6 +67,48 @@ stay put. For protocols whose hot path is small (lending refresh, oracle update,
 the fixed overhead is most of the per-call cost. For protocols whose hot path is large (CLMM swap
 through many ticks, complex liquidation chain), the savings are smaller in relative terms but
 still substantial in absolute terms when called millions of times per day.
+
+**W4 / W5 — the gap scales with mutable account count.** W4 and W5 each touch two mutable
+zero-copy accounts (Market + Book) where W3 touched one. The gap grows correspondingly:
+
+| Workload | Mut accounts | Gap (CU) |
+| -------- | -----------: | -------: |
+| W3a, W3b |            1 |      847 |
+| W4, W5   |            2 |    1,176 |
+
+The marginal cost of each additional `AccountLoader::load_mut` (Anchor) vs raw pointer cast
+(Pinocchio) is **~329 CU**. Extrapolating to a realistic lending-protocol refresh that touches
+5 mutable accounts (obligation + reserve + collateral + liquidity vault + user token account):
+`847 + 4 × 329 ≈ 2,160 CU` of pure framework overhead per call, before any useful work runs.
+
+That's the multi-account compounding the original framing predicted, measured.
+
+## What solinv would attach to W4/W5
+
+The matching-engine programs encode several invariants that a Pinocchio rewrite of a real DEX
+hot path would also need to preserve. These are exactly the targets an invariant-fuzzing
+companion would assert on each generated transaction sequence:
+
+1. **Tick price-sort monotonicity** — `book.ticks[i].price < book.ticks[i+1].price` for all
+   `i < count - 1`. Violated by an off-by-one in the shift loop.
+2. **Order count consistency** — `tick.n_orders ≤ TICK_DEPTH` always, and the count matches
+   the number of populated `orders[]` slots. Violated by a missed increment or stale slot.
+3. **FIFO order preservation** — for any tick, `orders[i].sequence ≤ orders[i+1].sequence`
+   when both are populated. Violated by wrong insertion index.
+4. **Sequence monotonicity** — `market.sequence` is strictly increasing across calls.
+   Violated by overflow handling that wraps instead of saturating, or by a forgotten increment.
+5. **Owner attribution** — for any populated order, `order.owner_pk == signer.address()`
+   for the transaction that placed it. Violated by reading the wrong account index.
+6. **No silent overwrite** — placing into a tick at depth `TICK_DEPTH` must error, not
+   overwrite slot 0. Violated by `n_orders %= TICK_DEPTH` instead of returning early.
+
+A Pinocchio rewrite of an existing Anchor matching engine that quietly drops any of these
+invariants would lose funds, freeze books, or attribute orders to the wrong owner. The
+constant-gap CU saving is only useful if the rewrite is safe, and "safe" here means: every
+one of these 6 invariants holds under arbitrary call sequences.
+
+This is the wedge: the CU rewrite generates ROI on every call; the invariant suite makes the
+rewrite shippable.
 
 ## Fairness caveats
 

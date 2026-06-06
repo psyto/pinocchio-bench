@@ -13,10 +13,12 @@ const ANCHOR_W0: &str = "2xBkAYW7smqE3a5uxVcarGDHLeiqFgJDnp8r2ZZhPiM2";
 const ANCHOR_W1: &str = "FLf2M1PEPVGXJFbwwPQg8REViTG6YpK4UoMCd22rsSey";
 const ANCHOR_W2: &str = "4fGGsS5fYeQ8VJfcR7eB2KNaYiYJvVEEqVC5t4EskB73";
 const ANCHOR_W3: &str = "7bTBRzPCg2tkq9vLHsKzPt5L8d3KYG7A1HuauwAKsGwV";
+const ANCHOR_W4: &str = "F84VDYJd5ukacECaHVkR6QJR1rD9nGmd2AJUw3qDvMN2";
 const PINO_W0: &str = "4PE1tkJYXdvEXNFmqLfmu8kfLTUNVCQvMv6dGruZemfR";
 const PINO_W1: &str = "2jc9CyUhCbKjqL7WTwWc3pysWzgXPN4ucbf6PUGnparY";
 const PINO_W2: &str = "64QzbP8eZ47r61Hvjj9JL1yJW7uj7QLvbo8txCKh7pEK";
 const PINO_W3: &str = "6QPHxpcsV7nxHnpVUJhSiS2B32RhyS65LX1a2t1pbZLY";
+const PINO_W4: &str = "EZxAdAKQbnD6HZqchzuFdD3UZYVUeF5u7ffYj2pHPbc8";
 const TOKEN_PROGRAM: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 
 const MINT_LEN: usize = 82;
@@ -81,10 +83,12 @@ fn load_programs(svm: &mut LiteSVM) {
         (ANCHOR_W1, "target/deploy/anchor_w1_write.so"),
         (ANCHOR_W2, "target/deploy/anchor_w2_spl_cpi.so"),
         (ANCHOR_W3, "target/deploy/anchor_w3_orderbook.so"),
+        (ANCHOR_W4, "target/deploy/anchor_w4_matching.so"),
         (PINO_W0, "target/deploy/pinocchio_w0_noop.so"),
         (PINO_W1, "target/deploy/pinocchio_w1_write.so"),
         (PINO_W2, "target/deploy/pinocchio_w2_spl_cpi.so"),
         (PINO_W3, "target/deploy/pinocchio_w3_orderbook.so"),
+        (PINO_W4, "target/deploy/pinocchio_w4_matching.so"),
     ];
     for (id, path) in progs {
         svm.add_program_from_file(pk(id), path)
@@ -352,6 +356,162 @@ fn w3_pino(svm: &mut LiteSVM, payer: &Keypair, prefill: usize, price: u64) -> Re
     run_tx(svm, ix, &[payer])
 }
 
+// ---------- W4 / W5: matching engine place_order ----------
+//
+// Layout (matches programs/{anchor,pinocchio}-w4-matching/src/lib.rs):
+//   Market = { sequence: u64, side: u8, _pad: [u8; 7] }       — 16 bytes
+//   Order  = { owner_pk: [u8; 32], qty: u64, sequence: u64 }  — 48 bytes
+//   Tick   = { price: u64, n_orders: u32, _pad: u32,
+//              orders: [Order; 4] }                            — 208 bytes
+//   Book   = { count: u32, _pad: u32, ticks: [Tick; 32] }     — 6664 bytes
+//
+// Both sides receive accounts in the same order:
+//   [signer (s, ro), market (mut), book (mut)]
+
+const W4_TICK_DEPTH: usize = 4;
+const W4_N_TICKS: usize = 32;
+const W4_ORDER_SIZE: usize = 48;
+const W4_TICK_SIZE: usize = 8 + 4 + 4 + W4_TICK_DEPTH * W4_ORDER_SIZE; // 208
+const W4_BOOK_BODY: usize = 4 + 4 + W4_N_TICKS * W4_TICK_SIZE;         // 6664
+const W4_MARKET_BODY: usize = 16;
+const W4_ANCHOR_MARKET: usize = 8 + W4_MARKET_BODY;
+const W4_ANCHOR_BOOK: usize = 8 + W4_BOOK_BODY;
+
+fn make_w4_book_body(prefill_ticks: usize, depth: usize) -> Vec<u8> {
+    let mut body = vec![0u8; W4_BOOK_BODY];
+    body[0..4].copy_from_slice(&(prefill_ticks as u32).to_le_bytes());
+    let placeholder_owner = [0xAAu8; 32];
+    for t in 0..prefill_ticks {
+        let price = 100u64 * (t as u64 + 1); // 100, 200, ..., 1600
+        let tick_off = 8 + t * W4_TICK_SIZE;
+        body[tick_off..tick_off + 8].copy_from_slice(&price.to_le_bytes());
+        body[tick_off + 8..tick_off + 12].copy_from_slice(&(depth as u32).to_le_bytes());
+        for d in 0..depth {
+            let order_off = tick_off + 16 + d * W4_ORDER_SIZE;
+            body[order_off..order_off + 32].copy_from_slice(&placeholder_owner);
+            body[order_off + 32..order_off + 40].copy_from_slice(&100u64.to_le_bytes());
+            body[order_off + 40..order_off + 48].copy_from_slice(&1u64.to_le_bytes());
+        }
+    }
+    body
+}
+
+fn make_w4_anchor_market(svm: &mut LiteSVM, owner: Pubkey) -> Pubkey {
+    let kp = Keypair::new();
+    let mut data = vec![0u8; W4_ANCHOR_MARKET];
+    data[..8].copy_from_slice(&anchor_acc_disc("Market"));
+    svm.set_account(
+        kp.pubkey(),
+        SolAccount {
+            lamports: 1_000_000,
+            data,
+            owner,
+            executable: false,
+            rent_epoch: 0,
+        },
+    )
+    .unwrap();
+    kp.pubkey()
+}
+
+fn make_w4_pino_market(svm: &mut LiteSVM, owner: Pubkey) -> Pubkey {
+    let kp = Keypair::new();
+    svm.set_account(
+        kp.pubkey(),
+        SolAccount {
+            lamports: 1_000_000,
+            data: vec![0u8; W4_MARKET_BODY],
+            owner,
+            executable: false,
+            rent_epoch: 0,
+        },
+    )
+    .unwrap();
+    kp.pubkey()
+}
+
+fn make_w4_anchor_book(svm: &mut LiteSVM, owner: Pubkey, prefill: usize, depth: usize) -> Pubkey {
+    let kp = Keypair::new();
+    let mut data = vec![0u8; W4_ANCHOR_BOOK];
+    data[..8].copy_from_slice(&anchor_acc_disc("Book"));
+    data[8..].copy_from_slice(&make_w4_book_body(prefill, depth));
+    svm.set_account(
+        kp.pubkey(),
+        SolAccount {
+            lamports: 50_000_000,
+            data,
+            owner,
+            executable: false,
+            rent_epoch: 0,
+        },
+    )
+    .unwrap();
+    kp.pubkey()
+}
+
+fn make_w4_pino_book(svm: &mut LiteSVM, owner: Pubkey, prefill: usize, depth: usize) -> Pubkey {
+    let kp = Keypair::new();
+    svm.set_account(
+        kp.pubkey(),
+        SolAccount {
+            lamports: 50_000_000,
+            data: make_w4_book_body(prefill, depth),
+            owner,
+            executable: false,
+            rent_epoch: 0,
+        },
+    )
+    .unwrap();
+    kp.pubkey()
+}
+
+fn w4_anchor(
+    svm: &mut LiteSVM,
+    payer: &Keypair,
+    prefill: usize,
+    depth: usize,
+    price: u64,
+) -> Result<u64, String> {
+    let market = make_w4_anchor_market(svm, pk(ANCHOR_W4));
+    let book = make_w4_anchor_book(svm, pk(ANCHOR_W4), prefill, depth);
+    let mut data = anchor_ix_disc("place_order").to_vec();
+    data.extend_from_slice(&price.to_le_bytes());
+    data.extend_from_slice(&10u64.to_le_bytes());
+    let ix = Instruction {
+        program_id: pk(ANCHOR_W4),
+        accounts: vec![
+            AccountMeta::new_readonly(payer.pubkey(), true),
+            AccountMeta::new(market, false),
+            AccountMeta::new(book, false),
+        ],
+        data,
+    };
+    run_tx(svm, ix, &[payer])
+}
+
+fn w4_pino(
+    svm: &mut LiteSVM,
+    payer: &Keypair,
+    prefill: usize,
+    depth: usize,
+    price: u64,
+) -> Result<u64, String> {
+    let market = make_w4_pino_market(svm, pk(PINO_W4));
+    let book = make_w4_pino_book(svm, pk(PINO_W4), prefill, depth);
+    let mut data = price.to_le_bytes().to_vec();
+    data.extend_from_slice(&10u64.to_le_bytes());
+    let ix = Instruction {
+        program_id: pk(PINO_W4),
+        accounts: vec![
+            AccountMeta::new_readonly(payer.pubkey(), true),
+            AccountMeta::new(market, false),
+            AccountMeta::new(book, false),
+        ],
+        data,
+    };
+    run_tx(svm, ix, &[payer])
+}
+
 // ---------- driver ----------
 
 fn report(name: &str, a: Result<u64, String>, p: Result<u64, String>) {
@@ -404,6 +564,16 @@ fn main() {
     let a = w3_anchor(&mut svm, &payer, 32, 100);
     let p = w3_pino(&mut svm, &payer, 32, 100);
     report("W3b orderbook +shift", a, p);
+
+    // W4: matching-engine place_order into empty book (2 mut accounts: market + book)
+    let a = w4_anchor(&mut svm, &payer, 0, 0, 500);
+    let p = w4_pino(&mut svm, &payer, 0, 0, 500);
+    report("W4 match empty book", a, p);
+
+    // W5: prefilled with 16 ticks @ depth 2 — insert at existing price=800 → FIFO append
+    let a = w4_anchor(&mut svm, &payer, 16, 2, 800);
+    let p = w4_pino(&mut svm, &payer, 16, 2, 800);
+    report("W5 match FIFO append", a, p);
 
     println!();
 }

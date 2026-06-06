@@ -1,0 +1,13 @@
+[package]
+name = "pinocchio-w4-matching"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "pinocchio_w4_matching"
+
+[dependencies]
+pinocchio = { workspace = true }
