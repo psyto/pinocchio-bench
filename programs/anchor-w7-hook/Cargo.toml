@@ -1,0 +1,20 @@
+[package]
+name = "anchor-w7-hook"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "anchor_w7_hook"
+
+[features]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+idl-build = ["anchor-lang/idl-build"]
+default = ["anchor-lang/interface-instructions"]
+
+[dependencies]
+anchor-lang = { workspace = true, features = ["interface-instructions"] }

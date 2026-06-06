@@ -7,12 +7,14 @@ members = [
     "programs/anchor-w3-orderbook",
     "programs/anchor-w4-matching",
     "programs/anchor-w6-multihop",
+    "programs/anchor-w7-hook",
     "programs/pinocchio-w0-noop",
     "programs/pinocchio-w1-write",
     "programs/pinocchio-w2-spl-cpi",
     "programs/pinocchio-w3-orderbook",
     "programs/pinocchio-w4-matching",
     "programs/pinocchio-w6-multihop",
+    "programs/pinocchio-w7-hook",
     "bench",
 ]
 

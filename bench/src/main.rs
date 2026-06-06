@@ -15,12 +15,15 @@ const ANCHOR_W2: &str = "4fGGsS5fYeQ8VJfcR7eB2KNaYiYJvVEEqVC5t4EskB73";
 const ANCHOR_W3: &str = "7bTBRzPCg2tkq9vLHsKzPt5L8d3KYG7A1HuauwAKsGwV";
 const ANCHOR_W4: &str = "F84VDYJd5ukacECaHVkR6QJR1rD9nGmd2AJUw3qDvMN2";
 const ANCHOR_W6: &str = "258rXi3tqTFeWe7DkcheLPtFdpb2MzSDvHVBMERETFHR";
+const ANCHOR_W7: &str = "3uVUZLsj8y7fPNpE6WksSjsZuLxUspL3pxKKeqbsnSQr";
 const PINO_W0: &str = "4PE1tkJYXdvEXNFmqLfmu8kfLTUNVCQvMv6dGruZemfR";
 const PINO_W1: &str = "2jc9CyUhCbKjqL7WTwWc3pysWzgXPN4ucbf6PUGnparY";
 const PINO_W2: &str = "64QzbP8eZ47r61Hvjj9JL1yJW7uj7QLvbo8txCKh7pEK";
 const PINO_W3: &str = "6QPHxpcsV7nxHnpVUJhSiS2B32RhyS65LX1a2t1pbZLY";
 const PINO_W4: &str = "EZxAdAKQbnD6HZqchzuFdD3UZYVUeF5u7ffYj2pHPbc8";
 const PINO_W6: &str = "EKvrHm487HWbrgiWzmHKJRZq34n1V56tZnrwNzmPuaUg";
+const PINO_W7: &str = "DbzYtKH9eZ2ejQo2RyBxdY2PGWVhLjnhdw9ja5pFFRno";
+const TOKEN_2022_PROGRAM: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
 const TOKEN_PROGRAM: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 
 const MINT_LEN: usize = 82;
@@ -87,12 +90,14 @@ fn load_programs(svm: &mut LiteSVM) {
         (ANCHOR_W3, "target/deploy/anchor_w3_orderbook.so"),
         (ANCHOR_W4, "target/deploy/anchor_w4_matching.so"),
         (ANCHOR_W6, "target/deploy/anchor_w6_multihop.so"),
+        (ANCHOR_W7, "target/deploy/anchor_w7_hook.so"),
         (PINO_W0, "target/deploy/pinocchio_w0_noop.so"),
         (PINO_W1, "target/deploy/pinocchio_w1_write.so"),
         (PINO_W2, "target/deploy/pinocchio_w2_spl_cpi.so"),
         (PINO_W3, "target/deploy/pinocchio_w3_orderbook.so"),
         (PINO_W4, "target/deploy/pinocchio_w4_matching.so"),
         (PINO_W6, "target/deploy/pinocchio_w6_multihop.so"),
+        (PINO_W7, "target/deploy/pinocchio_w7_hook.so"),
     ];
     for (id, path) in progs {
         svm.add_program_from_file(pk(id), path)
@@ -605,6 +610,177 @@ fn w6_pino(svm: &mut LiteSVM, payer: &Keypair) -> Result<u64, String> {
     run_tx(svm, ix, &[payer])
 }
 
+// ---------- W7: Token-2022 transfer with no-op transfer hook ----------
+//
+// A Token-2022 mint configured with the TransferHook extension causes Token-2022's
+// TransferChecked to perform an internal CPI into the hook program (with the
+// SPL-transfer-hook `execute` discriminator). The hook program does nothing here,
+// so we isolate the per-hook framework cost.
+//
+// Pre-creates:
+//   - Token-2022 mint with TransferHook extension pointing at the hook program
+//   - Source + destination Token-2022 accounts with TransferHookAccount extension
+//   - Extra account metas PDA at ["extra-account-metas", mint] under the hook program,
+//     containing a TLV entry for ExecuteInstruction with 0 extra metas
+
+const EXECUTE_DISCRIMINATOR: [u8; 8] = [105, 37, 101, 197, 75, 251, 102, 26];
+
+const TOKEN22_ACCOUNT_TYPE_OFFSET: usize = 165;
+const TOKEN22_TLV_START: usize = 166;
+
+const EXT_TYPE_TRANSFER_HOOK: u16 = 14;
+const EXT_TYPE_TRANSFER_HOOK_ACCOUNT: u16 = 15;
+const ACCOUNT_TYPE_MINT: u8 = 1;
+const ACCOUNT_TYPE_TOKEN: u8 = 2;
+const TOKEN_2022_TRANSFER_CHECKED_TAG: u8 = 12;
+
+fn derive_extra_metas_pda(mint: &Pubkey, hook_program: &Pubkey) -> Pubkey {
+    let (pda, _) = Pubkey::find_program_address(
+        &[b"extra-account-metas", mint.as_ref()],
+        hook_program,
+    );
+    pda
+}
+
+fn make_extra_metas_pda_data() -> Vec<u8> {
+    // TLV: 8-byte type + 4-byte length + value
+    // Value for `ExecuteInstruction` with 0 extras = PodSlice<ExtraAccountMeta>::pack(&[])
+    // which is just a 4-byte u32 count of zero.
+    let mut data = Vec::with_capacity(16);
+    data.extend_from_slice(&EXECUTE_DISCRIMINATOR);
+    data.extend_from_slice(&4u32.to_le_bytes()); // length of value
+    data.extend_from_slice(&0u32.to_le_bytes()); // count = 0 entries
+    data
+}
+
+fn make_token22_mint_with_hook(authority: &Pubkey, hook_program: &Pubkey) -> Vec<u8> {
+    // 0..165: base Mint (82 useful + 83 padding to TokenAccount-size)
+    // 165:    account_type marker = 1 (Mint)
+    // 166..:  TLV extensions
+    //   166..168 ExtensionType = 14 (TransferHook), u16 LE
+    //   168..170 Length = 64, u16 LE
+    //   170..202 authority pubkey (zero = None)
+    //   202..234 program_id pubkey (the hook program)
+    let mut buf = vec![0u8; 234];
+    // Base Mint
+    buf[0..4].copy_from_slice(&1u32.to_le_bytes()); // COption tag = Some (mint_authority)
+    buf[4..36].copy_from_slice(authority.as_ref());
+    buf[36..44].copy_from_slice(&1_000_000u64.to_le_bytes()); // supply
+    buf[44] = 6;                                              // decimals
+    buf[45] = 1;                                              // is_initialized
+    // freeze_authority COption tag = None (already zero)
+    buf[TOKEN22_ACCOUNT_TYPE_OFFSET] = ACCOUNT_TYPE_MINT;
+    buf[TOKEN22_TLV_START..TOKEN22_TLV_START + 2].copy_from_slice(&EXT_TYPE_TRANSFER_HOOK.to_le_bytes());
+    buf[TOKEN22_TLV_START + 2..TOKEN22_TLV_START + 4].copy_from_slice(&64u16.to_le_bytes());
+    // authority field stays zero (= None)
+    buf[TOKEN22_TLV_START + 4 + 32..TOKEN22_TLV_START + 4 + 64].copy_from_slice(hook_program.as_ref());
+    buf
+}
+
+fn make_token22_account_with_hook(mint: &Pubkey, owner: &Pubkey, amount: u64) -> Vec<u8> {
+    // 0..165: base Account (same layout as legacy SPL Token)
+    // 165:    account_type marker = 2 (Account)
+    // 166..:  TLV extensions
+    //   166..168 ExtensionType = 15 (TransferHookAccount)
+    //   168..170 Length = 1
+    //   170      transferring = 0
+    let mut buf = vec![0u8; 171];
+    buf[0..32].copy_from_slice(mint.as_ref());
+    buf[32..64].copy_from_slice(owner.as_ref());
+    buf[64..72].copy_from_slice(&amount.to_le_bytes());
+    buf[108] = 1; // state = Initialized
+    buf[TOKEN22_ACCOUNT_TYPE_OFFSET] = ACCOUNT_TYPE_TOKEN;
+    buf[TOKEN22_TLV_START..TOKEN22_TLV_START + 2]
+        .copy_from_slice(&EXT_TYPE_TRANSFER_HOOK_ACCOUNT.to_le_bytes());
+    buf[TOKEN22_TLV_START + 2..TOKEN22_TLV_START + 4].copy_from_slice(&1u16.to_le_bytes());
+    buf
+}
+
+fn w7_run(svm: &mut LiteSVM, payer: &Keypair, hook_pid: Pubkey) -> Result<u64, String> {
+    let token22 = pk(TOKEN_2022_PROGRAM);
+    let mint = Keypair::new();
+    let src = Keypair::new();
+    let dst = Keypair::new();
+    let extra_metas_pda = derive_extra_metas_pda(&mint.pubkey(), &hook_pid);
+
+    svm.set_account(
+        mint.pubkey(),
+        SolAccount {
+            lamports: 5_000_000,
+            data: make_token22_mint_with_hook(&payer.pubkey(), &hook_pid),
+            owner: token22,
+            executable: false,
+            rent_epoch: 0,
+        },
+    )
+    .unwrap();
+
+    svm.set_account(
+        src.pubkey(),
+        SolAccount {
+            lamports: 2_500_000,
+            data: make_token22_account_with_hook(&mint.pubkey(), &payer.pubkey(), 10_000),
+            owner: token22,
+            executable: false,
+            rent_epoch: 0,
+        },
+    )
+    .unwrap();
+
+    svm.set_account(
+        dst.pubkey(),
+        SolAccount {
+            lamports: 2_500_000,
+            data: make_token22_account_with_hook(&mint.pubkey(), &payer.pubkey(), 0),
+            owner: token22,
+            executable: false,
+            rent_epoch: 0,
+        },
+    )
+    .unwrap();
+
+    svm.set_account(
+        extra_metas_pda,
+        SolAccount {
+            lamports: 1_500_000,
+            data: make_extra_metas_pda_data(),
+            owner: hook_pid,
+            executable: false,
+            rent_epoch: 0,
+        },
+    )
+    .unwrap();
+
+    // Token-2022 TransferChecked instruction:
+    //   tag(1) = 12, amount(8), decimals(1) = 10 bytes
+    let mut data = vec![TOKEN_2022_TRANSFER_CHECKED_TAG];
+    data.extend_from_slice(&100u64.to_le_bytes());
+    data.push(6);
+
+    let ix = Instruction {
+        program_id: token22,
+        accounts: vec![
+            AccountMeta::new(src.pubkey(), false),
+            AccountMeta::new_readonly(mint.pubkey(), false),
+            AccountMeta::new(dst.pubkey(), false),
+            AccountMeta::new_readonly(payer.pubkey(), true),
+            // Hook accounts appended (Token-2022 expects them in this order):
+            AccountMeta::new_readonly(hook_pid, false),
+            AccountMeta::new_readonly(extra_metas_pda, false),
+        ],
+        data,
+    };
+    run_tx(svm, ix, &[payer])
+}
+
+fn w7_anchor(svm: &mut LiteSVM, payer: &Keypair) -> Result<u64, String> {
+    w7_run(svm, payer, pk(ANCHOR_W7))
+}
+
+fn w7_pino(svm: &mut LiteSVM, payer: &Keypair) -> Result<u64, String> {
+    w7_run(svm, payer, pk(PINO_W7))
+}
+
 // ---------- driver ----------
 
 fn report(name: &str, a: Result<u64, String>, p: Result<u64, String>) {
@@ -672,6 +848,11 @@ fn main() {
     let a = w6_anchor(&mut svm, &payer);
     let p = w6_pino(&mut svm, &payer);
     report("W6 3-hop SPL chain", a, p);
+
+    // W7: Token-2022 TransferChecked with no-op transfer hook
+    let a = w7_anchor(&mut svm, &payer);
+    let p = w7_pino(&mut svm, &payer);
+    report("W7 Token-2022 + hook", a, p);
 
     println!();
 }

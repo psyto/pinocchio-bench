@@ -394,6 +394,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "anchor-w7-hook"
+version = "0.1.0"
+dependencies = [
+ "anchor-lang",
+]
+
+[[package]]
 name = "ansi_term"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2113,6 +2120,13 @@ version = "0.1.0"
 dependencies = [
  "pinocchio",
  "pinocchio-token",
+]
+
+[[package]]
+name = "pinocchio-w7-hook"
+version = "0.1.0"
+dependencies = [
+ "pinocchio",
 ]
 
 [[package]]

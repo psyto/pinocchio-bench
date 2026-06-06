@@ -32,6 +32,7 @@ This repo re-measures the gap on the **current toolchain** (`anchor-cli 0.32.1`,
 | W4  | Matching engine place_order (2 mut accounts)   | Active |
 | W5  | Matching engine FIFO append into existing tick | Active |
 | W6  | 3-hop SPL Token CPI chain (Jupiter-route shape)| Active |
+| W7  | Token-2022 TransferChecked invoking no-op hook | Active |
 
 ## Results
 
@@ -47,6 +48,7 @@ Measured 2026-06-06 on Anchor 0.32.1 / Pinocchio 0.11.1 / Solana 3.1.14 / litesv
 | W4 match engine empty book     |     1,318 |          141 |  89.3%  |
 | W5 match engine FIFO append    |     1,383 |          208 |  85.0%  |
 | W6 3-hop SPL Token CPI chain   |    10,045 |        3,431 |  65.8%  |
+| W7 Token-2022 + transfer hook  |    12,352 |        8,169 |  33.9%  |
 
 **The gap follows two scaling laws, both linear:**
 
@@ -55,7 +57,9 @@ Measured 2026-06-06 on Anchor 0.32.1 / Pinocchio 0.11.1 / Solana 3.1.14 / litesv
 
 A realistic Jupiter route (3–5 hops): **~6,000–10,000 CU saved per swap** from CPI-wrapping
 overhead alone. A 5-account Kamino-style refresh: **~2,160 CU of pure framework overhead per call**.
-For protocols with hot paths called millions of times per day, this maps directly to user costs.
+A Token-2022 transfer hook (W7, measured end-to-end through real Token-2022): **~4,183 CU saved
+per transfer** of any token whose mint installs a transfer hook. For protocols with hot paths
+called millions of times per day, this maps directly to user costs.
 
 See [`RESULTS.md`](RESULTS.md) for the scaling analysis, Token-2022 hook extrapolation, and
 the 6 invariants a solinv-style fuzzer would attach to a real Pinocchio rewrite of the
@@ -89,12 +93,14 @@ pinocchio-bench/
 │   ├── anchor-w3-orderbook/    ← Anchor zero_copy + AccountLoader
 │   ├── anchor-w4-matching/     ← Anchor 2× AccountLoader (market + book)
 │   ├── anchor-w6-multihop/     ← Anchor 3× SPL Transfer CPI in one ix
+│   ├── anchor-w7-hook/         ← Anchor #[interface] transfer-hook execute
 │   ├── pinocchio-w0-noop/      ← Pinocchio no-op
 │   ├── pinocchio-w1-write/     ← Pinocchio manual signer + write
 │   ├── pinocchio-w2-spl-cpi/   ← Pinocchio + pinocchio-token transfer
 │   ├── pinocchio-w3-orderbook/ ← Pinocchio raw-pointer cast
 │   ├── pinocchio-w4-matching/  ← Pinocchio 2× raw cast (market + book)
-│   └── pinocchio-w6-multihop/  ← Pinocchio 3× pinocchio-token Transfer
+│   ├── pinocchio-w6-multihop/  ← Pinocchio 3× pinocchio-token Transfer
+│   └── pinocchio-w7-hook/      ← Pinocchio manual execute discriminator match
 ├── bench/                     ← litesvm harness
 └── scripts/
     └── build.sh

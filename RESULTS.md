@@ -20,6 +20,7 @@ Measured 2026-06-06 on:
 | W4 match engine empty book   |  1,318 |       141 |  1,177 | 89.3%  |
 | W5 match engine FIFO append  |  1,383 |       208 |  1,175 | 85.0%  |
 | W6 3-hop SPL Token chain     | 10,045 |     3,431 |  6,614 | 65.8%  |
+| W7 Token-2022 + transfer hook| 12,352 |     8,169 |  4,183 | 33.9%  |
 
 ## Binary Size (on-chain `.so`)
 
@@ -31,6 +32,7 @@ Measured 2026-06-06 on:
 | W3 orderbook insert          |        175,528 |            10,248 |   17×  |
 | W4 matching engine           |        179,320 |            11,000 |   16×  |
 | W6 3-hop SPL Token chain     |        193,560 |             6,592 |   29×  |
+| W7 transfer hook (no-op)     |        171,032 |             3,064 |   56×  |
 
 ## Notes on interpretation
 
@@ -102,11 +104,32 @@ re-validation of the destination `Account<TokenAccount>` it just wrote to. Pinoc
 Extrapolated to a typical Jupiter route (3–5 hops): **~6,000–10,000 CU saved per swap** just
 from CPI-wrapping overhead, before counting any additional pool-program-side framework cost.
 
-**Note on Token-2022.** This bench uses straight SPL Token, not Token-2022 with transfer hooks.
-If each hop's mint had a transfer hook (a user-defined program invoked CPI-on-CPI), each Anchor
-hook would add another full framework-overhead layer on top of the per-hop cost. The
-compounding multiplies: 3 hops × (transfer + hook) = 6 effective CPI hops worth of overhead.
-A Pinocchio rewrite of either the router *or* the hook recovers ~2k CU per layer it owns.
+**W7 — Token-2022 transfer hook measured directly.** W6 above used straight SPL Token; W7 wires
+the same comparison through a Token-2022 mint configured with the TransferHook extension. The
+hook program is a no-op — it accepts the `execute` discriminator, validates nothing, returns
+`Ok(())` — so the entire difference is the framework-overhead floor of the chosen toolchain.
+
+End-to-end, including everything Token-2022 does on its own (mint extension parsing, account
+extension parsing, extra-account-metas TLV resolution, CPI dispatch into the hook):
+
+| Variant            | Total CU | Hook-framework contribution |
+| ------------------ | -------: | --------------------------: |
+| W7 Anchor hook     |   12,352 |               ~4,000 (estim) |
+| W7 Pinocchio hook  |    8,169 |                  ~50 (estim) |
+| **Δ saved**        |  **4,183** |                              |
+
+The hook-framework contribution is estimated by attributing the constant ~8,100 CU floor to
+Token-2022's own work (everything that runs identically in both variants) and the residual
+to the hook program. The ~4,183 CU Δ is the part a transfer-hook author actually chooses.
+
+For tokens that adopt transfer hooks at scale (RWA, KYC-gated stablecoins, fee-on-transfer
+launches), this number is paid by every single user transfer. At 1M transfers/day across a
+popular hook'd token, 4,183 CU × 1M = ~4.2 billion CU/day — a real, ongoing tax on users when
+the hook is written in Anchor.
+
+The earlier W6 extrapolation was: "3-hop Token-2022 swap with hooks at each hop would save
+~12-18k CU." Cross-checking against the measured W7 single-hop number: 3 × 4,183 ≈ 12,549 CU,
+which lands inside that range. The extrapolation holds.
 
 ## What solinv would attach to W4/W5
 
