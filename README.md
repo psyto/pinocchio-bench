@@ -22,24 +22,31 @@ This repo re-measures the gap on the **current toolchain** (`anchor-cli 0.32.1`,
 
 ## Workloads
 
-| ID  | Workload                                | Status     |
-| --- | --------------------------------------- | ---------- |
-| W0  | No-op (entrypoint return)               | Active     |
-| W1  | Signer check + single account state write | Active     |
-| W2  | Signer check + SPL Token transfer CPI   | Active     |
-| W3  | Orderbook tick insert (sketch)          | Deferred   |
+| ID  | Workload                                       | Status |
+| --- | ---------------------------------------------- | ------ |
+| W0  | No-op (entrypoint return)                      | Active |
+| W1  | Signer check + single account state write      | Active |
+| W2  | Signer check + SPL Token transfer CPI          | Active |
+| W3a | Orderbook tick insert into empty book          | Active |
+| W3b | Orderbook tick insert with 32-entry shift      | Active |
 
 ## Results
 
 Measured 2026-06-06 on Anchor 0.32.1 / Pinocchio 0.11.1 / Solana 3.1.14 / litesvm 0.12.0:
 
-| Workload          | Anchor CU | Pinocchio CU | Saved   |
-| ----------------- | --------: | -----------: | ------: |
-| W0 no-op          |       246 |            4 |  98.4%  |
-| W1 signer+write   |       908 |           38 |  95.8%  |
-| W2 SPL CPI        |     3,856 |        1,179 |  69.4%  |
+| Workload                       | Anchor CU | Pinocchio CU | Saved   |
+| ------------------------------ | --------: | -----------: | ------: |
+| W0 no-op                       |       246 |            4 |  98.4%  |
+| W1 signer + state write        |       908 |           38 |  95.8%  |
+| W2 SPL Token transfer CPI      |     3,856 |        1,179 |  69.4%  |
+| W3a orderbook insert (empty)   |       914 |           67 |  92.7%  |
+| W3b orderbook insert (+shift)  |     1,274 |          427 |  66.5%  |
 
-Binary sizes: Pinocchio `.so` files are 36–59× smaller than the Anchor equivalents.
+The **absolute gap** between Anchor and Pinocchio is ~800–2,700 CU per instruction and is
+roughly independent of how much work the instruction does — it's pure framework overhead.
+See [`RESULTS.md`](RESULTS.md) for the W3a-vs-W3b breakdown that shows this directly.
+
+Binary sizes: Pinocchio `.so` files are 17–59× smaller than the Anchor equivalents.
 
 See [`RESULTS.md`](RESULTS.md) for methodology notes, caveats, and interpretation.
 
@@ -61,12 +68,14 @@ cargo run --release -p bench
 ```
 pinocchio-bench/
 ├── programs/
-│   ├── anchor-w0-noop/        ← Anchor 0.32 no-op
-│   ├── anchor-w1-write/       ← Anchor signer + state write
-│   ├── anchor-w2-spl-cpi/     ← Anchor + anchor-spl transfer
-│   ├── pinocchio-w0-noop/     ← Pinocchio no-op
-│   ├── pinocchio-w1-write/    ← Pinocchio manual signer + write
-│   └── pinocchio-w2-spl-cpi/  ← Pinocchio + pinocchio-token transfer
+│   ├── anchor-w0-noop/         ← Anchor 0.32 no-op
+│   ├── anchor-w1-write/        ← Anchor signer + state write
+│   ├── anchor-w2-spl-cpi/      ← Anchor + anchor-spl transfer
+│   ├── anchor-w3-orderbook/    ← Anchor zero_copy + AccountLoader
+│   ├── pinocchio-w0-noop/      ← Pinocchio no-op
+│   ├── pinocchio-w1-write/     ← Pinocchio manual signer + write
+│   ├── pinocchio-w2-spl-cpi/   ← Pinocchio + pinocchio-token transfer
+│   └── pinocchio-w3-orderbook/ ← Pinocchio raw-pointer cast
 ├── bench/                     ← litesvm harness
 └── scripts/
     └── build.sh

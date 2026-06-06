@@ -4,9 +4,11 @@ members = [
     "programs/anchor-w0-noop",
     "programs/anchor-w1-write",
     "programs/anchor-w2-spl-cpi",
+    "programs/anchor-w3-orderbook",
     "programs/pinocchio-w0-noop",
     "programs/pinocchio-w1-write",
     "programs/pinocchio-w2-spl-cpi",
+    "programs/pinocchio-w3-orderbook",
     "bench",
 ]
 

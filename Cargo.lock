@@ -370,6 +370,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "anchor-w3-orderbook"
+version = "0.1.0"
+dependencies = [
+ "anchor-lang",
+ "bytemuck",
+]
+
+[[package]]
 name = "ansi_term"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2067,6 +2075,13 @@ version = "0.1.0"
 dependencies = [
  "pinocchio",
  "pinocchio-token",
+]
+
+[[package]]
+name = "pinocchio-w3-orderbook"
+version = "0.1.0"
+dependencies = [
+ "pinocchio",
 ]
 
 [[package]]

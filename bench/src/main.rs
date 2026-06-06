@@ -12,9 +12,11 @@ use std::str::FromStr;
 const ANCHOR_W0: &str = "2xBkAYW7smqE3a5uxVcarGDHLeiqFgJDnp8r2ZZhPiM2";
 const ANCHOR_W1: &str = "FLf2M1PEPVGXJFbwwPQg8REViTG6YpK4UoMCd22rsSey";
 const ANCHOR_W2: &str = "4fGGsS5fYeQ8VJfcR7eB2KNaYiYJvVEEqVC5t4EskB73";
+const ANCHOR_W3: &str = "7bTBRzPCg2tkq9vLHsKzPt5L8d3KYG7A1HuauwAKsGwV";
 const PINO_W0: &str = "4PE1tkJYXdvEXNFmqLfmu8kfLTUNVCQvMv6dGruZemfR";
 const PINO_W1: &str = "2jc9CyUhCbKjqL7WTwWc3pysWzgXPN4ucbf6PUGnparY";
 const PINO_W2: &str = "64QzbP8eZ47r61Hvjj9JL1yJW7uj7QLvbo8txCKh7pEK";
+const PINO_W3: &str = "6QPHxpcsV7nxHnpVUJhSiS2B32RhyS65LX1a2t1pbZLY";
 const TOKEN_PROGRAM: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 
 const MINT_LEN: usize = 82;
@@ -78,9 +80,11 @@ fn load_programs(svm: &mut LiteSVM) {
         (ANCHOR_W0, "target/deploy/anchor_w0_noop.so"),
         (ANCHOR_W1, "target/deploy/anchor_w1_write.so"),
         (ANCHOR_W2, "target/deploy/anchor_w2_spl_cpi.so"),
+        (ANCHOR_W3, "target/deploy/anchor_w3_orderbook.so"),
         (PINO_W0, "target/deploy/pinocchio_w0_noop.so"),
         (PINO_W1, "target/deploy/pinocchio_w1_write.so"),
         (PINO_W2, "target/deploy/pinocchio_w2_spl_cpi.so"),
+        (PINO_W3, "target/deploy/pinocchio_w3_orderbook.so"),
     ];
     for (id, path) in progs {
         svm.add_program_from_file(pk(id), path)
@@ -261,6 +265,93 @@ fn w2_pino(svm: &mut LiteSVM, payer: &Keypair) -> Result<u64, String> {
     run_tx(svm, ix, &[payer])
 }
 
+// ---------- W3: orderbook tick insert ----------
+
+const TICK_CAPACITY: usize = 64;
+const ORDERBOOK_BODY_LEN: usize = 8 + 16 * TICK_CAPACITY; // count: u64 + ticks: [(u64, u64); 64]
+const ANCHOR_BOOK_LEN: usize = 8 + ORDERBOOK_BODY_LEN;
+
+// Build the raw 1032-byte orderbook body with the first `prefill` ticks populated.
+// Tick layout: 16 bytes (price u64 LE | qty u64 LE).
+fn make_book_body(prefill: usize) -> Vec<u8> {
+    let mut body = vec![0u8; ORDERBOOK_BODY_LEN];
+    body[..8].copy_from_slice(&(prefill as u64).to_le_bytes());
+    for i in 0..prefill {
+        let price = 200u64 * (i as u64 + 1); // 200, 400, ..., 6400
+        let qty = 100u64;
+        let off = 8 + i * 16;
+        body[off..off + 8].copy_from_slice(&price.to_le_bytes());
+        body[off + 8..off + 16].copy_from_slice(&qty.to_le_bytes());
+    }
+    body
+}
+
+fn make_anchor_book(svm: &mut LiteSVM, owner: Pubkey, prefill: usize) -> Pubkey {
+    let kp = Keypair::new();
+    let mut data = vec![0u8; ANCHOR_BOOK_LEN];
+    data[..8].copy_from_slice(&anchor_acc_disc("OrderBook"));
+    data[8..].copy_from_slice(&make_book_body(prefill));
+    svm.set_account(
+        kp.pubkey(),
+        SolAccount {
+            lamports: 10_000_000,
+            data,
+            owner,
+            executable: false,
+            rent_epoch: 0,
+        },
+    )
+    .unwrap();
+    kp.pubkey()
+}
+
+fn make_pino_book(svm: &mut LiteSVM, owner: Pubkey, prefill: usize) -> Pubkey {
+    let kp = Keypair::new();
+    svm.set_account(
+        kp.pubkey(),
+        SolAccount {
+            lamports: 10_000_000,
+            data: make_book_body(prefill),
+            owner,
+            executable: false,
+            rent_epoch: 0,
+        },
+    )
+    .unwrap();
+    kp.pubkey()
+}
+
+fn w3_anchor(svm: &mut LiteSVM, payer: &Keypair, prefill: usize, price: u64) -> Result<u64, String> {
+    let book = make_anchor_book(svm, pk(ANCHOR_W3), prefill);
+    let mut data = anchor_ix_disc("insert").to_vec();
+    data.extend_from_slice(&price.to_le_bytes());
+    data.extend_from_slice(&10u64.to_le_bytes());
+    let ix = Instruction {
+        program_id: pk(ANCHOR_W3),
+        accounts: vec![
+            AccountMeta::new_readonly(payer.pubkey(), true),
+            AccountMeta::new(book, false),
+        ],
+        data,
+    };
+    run_tx(svm, ix, &[payer])
+}
+
+fn w3_pino(svm: &mut LiteSVM, payer: &Keypair, prefill: usize, price: u64) -> Result<u64, String> {
+    let book = make_pino_book(svm, pk(PINO_W3), prefill);
+    let mut data = price.to_le_bytes().to_vec();
+    data.extend_from_slice(&10u64.to_le_bytes());
+    let ix = Instruction {
+        program_id: pk(PINO_W3),
+        accounts: vec![
+            AccountMeta::new_readonly(payer.pubkey(), true),
+            AccountMeta::new(book, false),
+        ],
+        data,
+    };
+    run_tx(svm, ix, &[payer])
+}
+
 // ---------- driver ----------
 
 fn report(name: &str, a: Result<u64, String>, p: Result<u64, String>) {
@@ -303,6 +394,16 @@ fn main() {
     let a = w2_anchor(&mut svm, &payer);
     let p = w2_pino(&mut svm, &payer);
     report("W2 SPL CPI", a, p);
+
+    // W3a: empty book — single compare, no shift
+    let a = w3_anchor(&mut svm, &payer, 0, 500);
+    let p = w3_pino(&mut svm, &payer, 0, 500);
+    report("W3a orderbook empty", a, p);
+
+    // W3b: half-full (32 ticks at 200,400,...,6400) — insert at price=100 → 5 compares + 32-entry shift
+    let a = w3_anchor(&mut svm, &payer, 32, 100);
+    let p = w3_pino(&mut svm, &payer, 32, 100);
+    report("W3b orderbook +shift", a, p);
 
     println!();
 }

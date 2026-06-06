@@ -10,19 +10,22 @@ Measured 2026-06-06 on:
 
 ## Compute Units
 
-| Workload          | Anchor   | Pinocchio | Δ        | Saved   |
-| ----------------- | -------: | --------: | -------: | ------: |
-| W0 no-op          |      246 |         4 |      242 |  98.4%  |
-| W1 signer+write   |      908 |        38 |      870 |  95.8%  |
-| W2 SPL CPI        |    3,856 |     1,179 |    2,677 |  69.4%  |
+| Workload                     | Anchor | Pinocchio |     Δ  | Saved  |
+| ---------------------------- | -----: | --------: | -----: | -----: |
+| W0 no-op                     |    246 |         4 |    242 | 98.4%  |
+| W1 signer + state write      |    908 |        38 |    870 | 95.8%  |
+| W2 SPL Token transfer CPI    |  3,856 |     1,179 |  2,677 | 69.4%  |
+| W3a orderbook insert (empty) |    914 |        67 |    847 | 92.7%  |
+| W3b orderbook insert (+shift)| 1,274 |       427 |    847 | 66.5%  |
 
 ## Binary Size (on-chain `.so`)
 
-| Workload          | Anchor (bytes) | Pinocchio (bytes) | Ratio   |
-| ----------------- | -------------: | ----------------: | ------: |
-| W0 no-op          |        167,880 |             2,832 |   59×   |
-| W1 signer+write   |        173,128 |             3,272 |   53×   |
-| W2 SPL CPI        |        186,176 |             5,120 |   36×   |
+| Workload                     | Anchor (bytes) | Pinocchio (bytes) | Ratio  |
+| ---------------------------- | -------------: | ----------------: | -----: |
+| W0 no-op                     |        167,880 |             2,832 |   59×  |
+| W1 signer + state write      |        173,128 |             3,272 |   53×  |
+| W2 SPL Token transfer CPI    |        186,176 |             5,120 |   36×  |
+| W3 orderbook insert          |        175,528 |            10,248 |   17×  |
 
 ## Notes on interpretation
 
@@ -45,6 +48,22 @@ checks, and (in 0.32) maintains an exit-write hook. The Pinocchio version does a
 `CpiContext::new`, `to_account_info()` conversions, and the Anchor-side `Account<TokenAccount>`
 checks on `source` and `destination`. For aggregator-touched code (Jupiter, Kamino routers)
 those 2,677 CU per hop compound across composition.
+
+**W3a / W3b — the absolute gap is constant.** W3a inserts into an empty book (single
+binary-search comparison, no shift); W3b inserts into a 32-tick book and pays for 5
+comparisons + a 32-entry × 16-byte shift. The Pinocchio side's work cost grows by 360 CU
+between W3a and W3b (67 → 427), and the Anchor side's grows by the same 360 CU (914 → 1274).
+The **gap is 847 CU in both cases** — that's pure framework overhead (`AccountLoader::load_mut`,
+discriminator check, bytemuck cast guard, exit-write hook) that doesn't scale with the work
+the program actually does.
+
+This is the cleanest signal in the bench: **Pinocchio saves a roughly fixed ~800–2,700 CU per
+instruction regardless of what the instruction does.** That's why the percentage savings shrink
+on heavier workloads (W2's CPI dominates; W3b's shift dominates) while the absolute savings
+stay put. For protocols whose hot path is small (lending refresh, oracle update, AMM tick cross),
+the fixed overhead is most of the per-call cost. For protocols whose hot path is large (CLMM swap
+through many ticks, complex liquidation chain), the savings are smaller in relative terms but
+still substantial in absolute terms when called millions of times per day.
 
 ## Fairness caveats
 

@@ -7,9 +7,11 @@ PROGRAMS=(
     anchor-w0-noop
     anchor-w1-write
     anchor-w2-spl-cpi
+    anchor-w3-orderbook
     pinocchio-w0-noop
     pinocchio-w1-write
     pinocchio-w2-spl-cpi
+    pinocchio-w3-orderbook
 )
 
 for prog in "${PROGRAMS[@]}"; do
