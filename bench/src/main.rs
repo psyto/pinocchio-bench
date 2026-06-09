@@ -16,6 +16,7 @@ const ANCHOR_W3: &str = "7bTBRzPCg2tkq9vLHsKzPt5L8d3KYG7A1HuauwAKsGwV";
 const ANCHOR_W4: &str = "F84VDYJd5ukacECaHVkR6QJR1rD9nGmd2AJUw3qDvMN2";
 const ANCHOR_W6: &str = "258rXi3tqTFeWe7DkcheLPtFdpb2MzSDvHVBMERETFHR";
 const ANCHOR_W7: &str = "3uVUZLsj8y7fPNpE6WksSjsZuLxUspL3pxKKeqbsnSQr";
+const ANCHOR_W8: &str = "Hf89Tqt9FdVdAEsgt3UkmzriXRLPFYqeYE4hHJaSzTjN";
 const PINO_W0: &str = "4PE1tkJYXdvEXNFmqLfmu8kfLTUNVCQvMv6dGruZemfR";
 const PINO_W1: &str = "2jc9CyUhCbKjqL7WTwWc3pysWzgXPN4ucbf6PUGnparY";
 const PINO_W2: &str = "64QzbP8eZ47r61Hvjj9JL1yJW7uj7QLvbo8txCKh7pEK";
@@ -23,6 +24,7 @@ const PINO_W3: &str = "6QPHxpcsV7nxHnpVUJhSiS2B32RhyS65LX1a2t1pbZLY";
 const PINO_W4: &str = "EZxAdAKQbnD6HZqchzuFdD3UZYVUeF5u7ffYj2pHPbc8";
 const PINO_W6: &str = "EKvrHm487HWbrgiWzmHKJRZq34n1V56tZnrwNzmPuaUg";
 const PINO_W7: &str = "DbzYtKH9eZ2ejQo2RyBxdY2PGWVhLjnhdw9ja5pFFRno";
+const PINO_W8: &str = "DRJ9FZj2xNjSnydfSMiagn49JcXDmDfqV8miH4hhfZds";
 const TOKEN_2022_PROGRAM: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
 const TOKEN_PROGRAM: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 
@@ -91,6 +93,7 @@ fn load_programs(svm: &mut LiteSVM) {
         (ANCHOR_W4, "target/deploy/anchor_w4_matching.so"),
         (ANCHOR_W6, "target/deploy/anchor_w6_multihop.so"),
         (ANCHOR_W7, "target/deploy/anchor_w7_hook.so"),
+        (ANCHOR_W8, "target/deploy/anchor_w8_amm.so"),
         (PINO_W0, "target/deploy/pinocchio_w0_noop.so"),
         (PINO_W1, "target/deploy/pinocchio_w1_write.so"),
         (PINO_W2, "target/deploy/pinocchio_w2_spl_cpi.so"),
@@ -98,6 +101,7 @@ fn load_programs(svm: &mut LiteSVM) {
         (PINO_W4, "target/deploy/pinocchio_w4_matching.so"),
         (PINO_W6, "target/deploy/pinocchio_w6_multihop.so"),
         (PINO_W7, "target/deploy/pinocchio_w7_hook.so"),
+        (PINO_W8, "target/deploy/pinocchio_w8_amm.so"),
     ];
     for (id, path) in progs {
         svm.add_program_from_file(pk(id), path)
@@ -781,6 +785,161 @@ fn w7_pino(svm: &mut LiteSVM, payer: &Keypair) -> Result<u64, String> {
     w7_run(svm, payer, pk(PINO_W7))
 }
 
+// ---------- W8: AMM constant-product swap ----------
+//
+// Single-hop Raydium/Meteora-shape swap:
+//   [signer (s, ro), pool (mut zero-copy), user_src (mut), user_dst (mut),
+//    pool_vault_in (mut), pool_vault_out (mut), token_program (ro)]
+//
+// Pool state body layout (matches both programs):
+//   reserve_in:  u64  (offset 0)
+//   reserve_out: u64  (offset 8)
+//   fee_bps:     u16  (offset 16)
+//   _pad:        [u8; 6]
+// = 24 bytes body. Anchor adds 8-byte discriminator.
+//
+// Bench simplification: authority = payer for all four token accounts.
+// Real AMMs use a PDA authority + invoke_signed for vault outflows; that is
+// a separate axis (PDA derivation cost) and can be measured in a future W8b.
+
+const W8_POOL_BODY: usize = 24;
+const W8_ANCHOR_POOL: usize = 8 + W8_POOL_BODY;
+
+fn make_w8_pool_body(reserve_in: u64, reserve_out: u64, fee_bps: u16) -> Vec<u8> {
+    let mut body = vec![0u8; W8_POOL_BODY];
+    body[0..8].copy_from_slice(&reserve_in.to_le_bytes());
+    body[8..16].copy_from_slice(&reserve_out.to_le_bytes());
+    body[16..18].copy_from_slice(&fee_bps.to_le_bytes());
+    body
+}
+
+fn make_w8_anchor_pool(svm: &mut LiteSVM, owner: Pubkey) -> Pubkey {
+    let kp = Keypair::new();
+    let mut data = vec![0u8; W8_ANCHOR_POOL];
+    data[..8].copy_from_slice(&anchor_acc_disc("Pool"));
+    data[8..].copy_from_slice(&make_w8_pool_body(1_000_000, 2_000_000, 30));
+    svm.set_account(
+        kp.pubkey(),
+        SolAccount {
+            lamports: 1_500_000,
+            data,
+            owner,
+            executable: false,
+            rent_epoch: 0,
+        },
+    )
+    .unwrap();
+    kp.pubkey()
+}
+
+fn make_w8_pino_pool(svm: &mut LiteSVM, owner: Pubkey) -> Pubkey {
+    let kp = Keypair::new();
+    svm.set_account(
+        kp.pubkey(),
+        SolAccount {
+            lamports: 1_000_000,
+            data: make_w8_pool_body(1_000_000, 2_000_000, 30),
+            owner,
+            executable: false,
+            rent_epoch: 0,
+        },
+    )
+    .unwrap();
+    kp.pubkey()
+}
+
+// Creates two mints (A, B) and four SPL token accounts:
+//   user_src (mint_a, amount=10_000),  user_dst (mint_b, amount=0),
+//   pool_vault_in (mint_a, amount=0),  pool_vault_out (mint_b, amount=10_000)
+// All four owned by `authority`.
+fn setup_w8_tokens(svm: &mut LiteSVM, authority: Pubkey) -> [Pubkey; 4] {
+    let mint_a = Keypair::new();
+    let mint_b = Keypair::new();
+    let token_pid = pk(TOKEN_PROGRAM);
+
+    for (mint, supply) in [(&mint_a, 10_000_000u64), (&mint_b, 10_000_000u64)] {
+        svm.set_account(
+            mint.pubkey(),
+            SolAccount {
+                lamports: 1_500_000,
+                data: make_mint(&authority, supply, 6),
+                owner: token_pid,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    }
+
+    let make_acc = |svm: &mut LiteSVM, mint: &Pubkey, amount: u64| -> Pubkey {
+        let kp = Keypair::new();
+        svm.set_account(
+            kp.pubkey(),
+            SolAccount {
+                lamports: 2_039_280,
+                data: make_token_account(mint, &authority, amount),
+                owner: token_pid,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+        kp.pubkey()
+    };
+
+    let user_src = make_acc(svm, &mint_a.pubkey(), 10_000);
+    let user_dst = make_acc(svm, &mint_b.pubkey(), 0);
+    let pool_vault_in = make_acc(svm, &mint_a.pubkey(), 0);
+    let pool_vault_out = make_acc(svm, &mint_b.pubkey(), 10_000);
+
+    [user_src, user_dst, pool_vault_in, pool_vault_out]
+}
+
+fn w8_anchor(svm: &mut LiteSVM, payer: &Keypair) -> Result<u64, String> {
+    let pool = make_w8_anchor_pool(svm, pk(ANCHOR_W8));
+    let [user_src, user_dst, pool_vault_in, pool_vault_out] =
+        setup_w8_tokens(svm, payer.pubkey());
+    let mut data = anchor_ix_disc("swap").to_vec();
+    data.extend_from_slice(&1_000u64.to_le_bytes()); // amount_in
+    data.extend_from_slice(&0u64.to_le_bytes());     // min_out (no slippage check)
+    let ix = Instruction {
+        program_id: pk(ANCHOR_W8),
+        accounts: vec![
+            AccountMeta::new_readonly(payer.pubkey(), true),
+            AccountMeta::new(pool, false),
+            AccountMeta::new(user_src, false),
+            AccountMeta::new(user_dst, false),
+            AccountMeta::new(pool_vault_in, false),
+            AccountMeta::new(pool_vault_out, false),
+            AccountMeta::new_readonly(pk(TOKEN_PROGRAM), false),
+        ],
+        data,
+    };
+    run_tx(svm, ix, &[payer])
+}
+
+fn w8_pino(svm: &mut LiteSVM, payer: &Keypair) -> Result<u64, String> {
+    let pool = make_w8_pino_pool(svm, pk(PINO_W8));
+    let [user_src, user_dst, pool_vault_in, pool_vault_out] =
+        setup_w8_tokens(svm, payer.pubkey());
+    let mut data = 1_000u64.to_le_bytes().to_vec(); // amount_in
+    data.extend_from_slice(&0u64.to_le_bytes());    // min_out
+    let ix = Instruction {
+        program_id: pk(PINO_W8),
+        accounts: vec![
+            AccountMeta::new_readonly(payer.pubkey(), true),
+            AccountMeta::new(pool, false),
+            AccountMeta::new(user_src, false),
+            AccountMeta::new(user_dst, false),
+            AccountMeta::new(pool_vault_in, false),
+            AccountMeta::new(pool_vault_out, false),
+            AccountMeta::new_readonly(pk(TOKEN_PROGRAM), false),
+        ],
+        data,
+    };
+    run_tx(svm, ix, &[payer])
+}
+
 // ---------- driver ----------
 
 fn report(name: &str, a: Result<u64, String>, p: Result<u64, String>) {
@@ -853,6 +1012,11 @@ fn main() {
     let a = w7_anchor(&mut svm, &payer);
     let p = w7_pino(&mut svm, &payer);
     report("W7 Token-2022 + hook", a, p);
+
+    // W8: AMM constant-product swap (Raydium/Meteora shape, single hop)
+    let a = w8_anchor(&mut svm, &payer);
+    let p = w8_pino(&mut svm, &payer);
+    report("W8 AMM swap", a, p);
 
     println!();
 }
