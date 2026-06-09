@@ -17,6 +17,7 @@ const ANCHOR_W4: &str = "F84VDYJd5ukacECaHVkR6QJR1rD9nGmd2AJUw3qDvMN2";
 const ANCHOR_W6: &str = "258rXi3tqTFeWe7DkcheLPtFdpb2MzSDvHVBMERETFHR";
 const ANCHOR_W7: &str = "3uVUZLsj8y7fPNpE6WksSjsZuLxUspL3pxKKeqbsnSQr";
 const ANCHOR_W8: &str = "Hf89Tqt9FdVdAEsgt3UkmzriXRLPFYqeYE4hHJaSzTjN";
+const ANCHOR_W9: &str = "AhdfeAdeXFQNoqfg6XMHU59bi5cty5CZS7b92A1ERZK9";
 const PINO_W0: &str = "4PE1tkJYXdvEXNFmqLfmu8kfLTUNVCQvMv6dGruZemfR";
 const PINO_W1: &str = "2jc9CyUhCbKjqL7WTwWc3pysWzgXPN4ucbf6PUGnparY";
 const PINO_W2: &str = "64QzbP8eZ47r61Hvjj9JL1yJW7uj7QLvbo8txCKh7pEK";
@@ -25,6 +26,7 @@ const PINO_W4: &str = "EZxAdAKQbnD6HZqchzuFdD3UZYVUeF5u7ffYj2pHPbc8";
 const PINO_W6: &str = "EKvrHm487HWbrgiWzmHKJRZq34n1V56tZnrwNzmPuaUg";
 const PINO_W7: &str = "DbzYtKH9eZ2ejQo2RyBxdY2PGWVhLjnhdw9ja5pFFRno";
 const PINO_W8: &str = "DRJ9FZj2xNjSnydfSMiagn49JcXDmDfqV8miH4hhfZds";
+const PINO_W9: &str = "AUfBb1dJr392vYKgKMqEYJoWTTjeE6GsWctcrir6mg3";
 const TOKEN_2022_PROGRAM: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
 const TOKEN_PROGRAM: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 
@@ -94,6 +96,7 @@ fn load_programs(svm: &mut LiteSVM) {
         (ANCHOR_W6, "target/deploy/anchor_w6_multihop.so"),
         (ANCHOR_W7, "target/deploy/anchor_w7_hook.so"),
         (ANCHOR_W8, "target/deploy/anchor_w8_amm.so"),
+        (ANCHOR_W9, "target/deploy/anchor_w9_refresh.so"),
         (PINO_W0, "target/deploy/pinocchio_w0_noop.so"),
         (PINO_W1, "target/deploy/pinocchio_w1_write.so"),
         (PINO_W2, "target/deploy/pinocchio_w2_spl_cpi.so"),
@@ -102,6 +105,7 @@ fn load_programs(svm: &mut LiteSVM) {
         (PINO_W6, "target/deploy/pinocchio_w6_multihop.so"),
         (PINO_W7, "target/deploy/pinocchio_w7_hook.so"),
         (PINO_W8, "target/deploy/pinocchio_w8_amm.so"),
+        (PINO_W9, "target/deploy/pinocchio_w9_refresh.so"),
     ];
     for (id, path) in progs {
         svm.add_program_from_file(pk(id), path)
@@ -940,6 +944,178 @@ fn w8_pino(svm: &mut LiteSVM, payer: &Keypair) -> Result<u64, String> {
     run_tx(svm, ix, &[payer])
 }
 
+// ---------- W9: lending refresh (Kamino-shape) ----------
+//
+// 5 mutable zero-copy accounts — obligation + 2 reserves + 2 oracles — touched
+// in a single refresh instruction. Extends the per-account scaling law to N=5.
+//
+// Accounts (both sides, same order):
+//   [signer (s, ro), obligation (mut), reserve_a (mut), reserve_b (mut),
+//    oracle_a (mut), oracle_b (mut)]
+//
+// State layouts (matches programs/{anchor,pinocchio}-w9-refresh/src/lib.rs):
+//   Obligation = { deposit_amount: u64, borrow_amount: u64,
+//                  last_health: u64, last_update_slot: u64 }                   — 32 bytes
+//   Reserve    = { total_liquidity: u64, total_borrows: u64,
+//                  cumulative_borrow_rate: u64, borrow_rate_bps: u32,
+//                  _pad: u32, last_update_slot: u64 }                          — 40 bytes
+//   Oracle     = { price: u64, conf: u64, last_update_slot: u64 }              — 24 bytes
+//
+// Real Kamino refresh_obligation has 3 mut (obligation + 2 reserves) and 2 ro
+// (oracles). W9 keeps all 5 as mut to isolate the per-mut-account scaling law
+// cleanly. A future W9b can split RO vs mut.
+
+const W9_OBLIGATION_BODY: usize = 32;
+const W9_RESERVE_BODY: usize = 40;
+const W9_ORACLE_BODY: usize = 24;
+const W9_ANCHOR_OBLIGATION: usize = 8 + W9_OBLIGATION_BODY;
+const W9_ANCHOR_RESERVE: usize = 8 + W9_RESERVE_BODY;
+const W9_ANCHOR_ORACLE: usize = 8 + W9_ORACLE_BODY;
+
+fn make_w9_obligation_body(deposit: u64, borrow: u64) -> Vec<u8> {
+    let mut body = vec![0u8; W9_OBLIGATION_BODY];
+    body[0..8].copy_from_slice(&deposit.to_le_bytes());
+    body[8..16].copy_from_slice(&borrow.to_le_bytes());
+    // last_health = 0, last_update_slot = 0
+    body
+}
+
+fn make_w9_reserve_body(liquidity: u64, borrows: u64, borrow_rate_bps: u32) -> Vec<u8> {
+    let mut body = vec![0u8; W9_RESERVE_BODY];
+    body[0..8].copy_from_slice(&liquidity.to_le_bytes());
+    body[8..16].copy_from_slice(&borrows.to_le_bytes());
+    // cumulative_borrow_rate = 0
+    body[24..28].copy_from_slice(&borrow_rate_bps.to_le_bytes());
+    // _pad = 0, last_update_slot = 0
+    body
+}
+
+fn make_w9_oracle_body(price: u64, conf: u64) -> Vec<u8> {
+    let mut body = vec![0u8; W9_ORACLE_BODY];
+    body[0..8].copy_from_slice(&price.to_le_bytes());
+    body[8..16].copy_from_slice(&conf.to_le_bytes());
+    // last_update_slot = 0
+    body
+}
+
+fn make_w9_anchor_account(
+    svm: &mut LiteSVM,
+    owner: Pubkey,
+    disc_name: &str,
+    body: Vec<u8>,
+    total_len: usize,
+) -> Pubkey {
+    let kp = Keypair::new();
+    let mut data = vec![0u8; total_len];
+    data[..8].copy_from_slice(&anchor_acc_disc(disc_name));
+    data[8..].copy_from_slice(&body);
+    svm.set_account(
+        kp.pubkey(),
+        SolAccount {
+            lamports: 5_000_000,
+            data,
+            owner,
+            executable: false,
+            rent_epoch: 0,
+        },
+    )
+    .unwrap();
+    kp.pubkey()
+}
+
+fn make_w9_pino_account(svm: &mut LiteSVM, owner: Pubkey, body: Vec<u8>) -> Pubkey {
+    let kp = Keypair::new();
+    svm.set_account(
+        kp.pubkey(),
+        SolAccount {
+            lamports: 5_000_000,
+            data: body,
+            owner,
+            executable: false,
+            rent_epoch: 0,
+        },
+    )
+    .unwrap();
+    kp.pubkey()
+}
+
+fn w9_anchor(svm: &mut LiteSVM, payer: &Keypair, current_slot: u64) -> Result<u64, String> {
+    let owner = pk(ANCHOR_W9);
+    let obligation = make_w9_anchor_account(
+        svm,
+        owner,
+        "Obligation",
+        make_w9_obligation_body(1_000, 500),
+        W9_ANCHOR_OBLIGATION,
+    );
+    let reserve_a = make_w9_anchor_account(
+        svm,
+        owner,
+        "Reserve",
+        make_w9_reserve_body(1_000_000, 500_000, 300),
+        W9_ANCHOR_RESERVE,
+    );
+    let reserve_b = make_w9_anchor_account(
+        svm,
+        owner,
+        "Reserve",
+        make_w9_reserve_body(2_000_000, 800_000, 250),
+        W9_ANCHOR_RESERVE,
+    );
+    let oracle_a = make_w9_anchor_account(
+        svm,
+        owner,
+        "Oracle",
+        make_w9_oracle_body(100, 1),
+        W9_ANCHOR_ORACLE,
+    );
+    let oracle_b = make_w9_anchor_account(
+        svm,
+        owner,
+        "Oracle",
+        make_w9_oracle_body(50, 1),
+        W9_ANCHOR_ORACLE,
+    );
+    let mut data = anchor_ix_disc("refresh").to_vec();
+    data.extend_from_slice(&current_slot.to_le_bytes());
+    let ix = Instruction {
+        program_id: owner,
+        accounts: vec![
+            AccountMeta::new_readonly(payer.pubkey(), true),
+            AccountMeta::new(obligation, false),
+            AccountMeta::new(reserve_a, false),
+            AccountMeta::new(reserve_b, false),
+            AccountMeta::new(oracle_a, false),
+            AccountMeta::new(oracle_b, false),
+        ],
+        data,
+    };
+    run_tx(svm, ix, &[payer])
+}
+
+fn w9_pino(svm: &mut LiteSVM, payer: &Keypair, current_slot: u64) -> Result<u64, String> {
+    let owner = pk(PINO_W9);
+    let obligation = make_w9_pino_account(svm, owner, make_w9_obligation_body(1_000, 500));
+    let reserve_a = make_w9_pino_account(svm, owner, make_w9_reserve_body(1_000_000, 500_000, 300));
+    let reserve_b = make_w9_pino_account(svm, owner, make_w9_reserve_body(2_000_000, 800_000, 250));
+    let oracle_a = make_w9_pino_account(svm, owner, make_w9_oracle_body(100, 1));
+    let oracle_b = make_w9_pino_account(svm, owner, make_w9_oracle_body(50, 1));
+    let data = current_slot.to_le_bytes().to_vec();
+    let ix = Instruction {
+        program_id: owner,
+        accounts: vec![
+            AccountMeta::new_readonly(payer.pubkey(), true),
+            AccountMeta::new(obligation, false),
+            AccountMeta::new(reserve_a, false),
+            AccountMeta::new(reserve_b, false),
+            AccountMeta::new(oracle_a, false),
+            AccountMeta::new(oracle_b, false),
+        ],
+        data,
+    };
+    run_tx(svm, ix, &[payer])
+}
+
 // ---------- driver ----------
 
 fn report(name: &str, a: Result<u64, String>, p: Result<u64, String>) {
@@ -1017,6 +1193,11 @@ fn main() {
     let a = w8_anchor(&mut svm, &payer);
     let p = w8_pino(&mut svm, &payer);
     report("W8 AMM swap", a, p);
+
+    // W9: lending refresh — 5 mut zero-copy accounts (Kamino-shape)
+    let a = w9_anchor(&mut svm, &payer, 1_000);
+    let p = w9_pino(&mut svm, &payer, 1_000);
+    report("W9 lending refresh", a, p);
 
     println!();
 }

@@ -12,6 +12,7 @@ PROGRAMS=(
     anchor-w6-multihop
     anchor-w7-hook
     anchor-w8-amm
+    anchor-w9-refresh
     pinocchio-w0-noop
     pinocchio-w1-write
     pinocchio-w2-spl-cpi
@@ -20,6 +21,7 @@ PROGRAMS=(
     pinocchio-w6-multihop
     pinocchio-w7-hook
     pinocchio-w8-amm
+    pinocchio-w9-refresh
 )
 
 for prog in "${PROGRAMS[@]}"; do
