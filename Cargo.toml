@@ -10,6 +10,7 @@ members = [
     "programs/anchor-w7-hook",
     "programs/anchor-w8-amm",
     "programs/anchor-w9-refresh",
+    "programs/anchor-w10-vault",
     "programs/pinocchio-w0-noop",
     "programs/pinocchio-w1-write",
     "programs/pinocchio-w2-spl-cpi",
@@ -19,6 +20,7 @@ members = [
     "programs/pinocchio-w7-hook",
     "programs/pinocchio-w8-amm",
     "programs/pinocchio-w9-refresh",
+    "programs/pinocchio-w10-vault",
     "bench",
 ]
 

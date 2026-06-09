@@ -18,6 +18,7 @@ const ANCHOR_W6: &str = "258rXi3tqTFeWe7DkcheLPtFdpb2MzSDvHVBMERETFHR";
 const ANCHOR_W7: &str = "3uVUZLsj8y7fPNpE6WksSjsZuLxUspL3pxKKeqbsnSQr";
 const ANCHOR_W8: &str = "Hf89Tqt9FdVdAEsgt3UkmzriXRLPFYqeYE4hHJaSzTjN";
 const ANCHOR_W9: &str = "AhdfeAdeXFQNoqfg6XMHU59bi5cty5CZS7b92A1ERZK9";
+const ANCHOR_W10: &str = "2N5cmNMVnqrQDWaKE2oP92bVDwMvGNW69k7mpQfyyiMh";
 const PINO_W0: &str = "4PE1tkJYXdvEXNFmqLfmu8kfLTUNVCQvMv6dGruZemfR";
 const PINO_W1: &str = "2jc9CyUhCbKjqL7WTwWc3pysWzgXPN4ucbf6PUGnparY";
 const PINO_W2: &str = "64QzbP8eZ47r61Hvjj9JL1yJW7uj7QLvbo8txCKh7pEK";
@@ -27,6 +28,7 @@ const PINO_W6: &str = "EKvrHm487HWbrgiWzmHKJRZq34n1V56tZnrwNzmPuaUg";
 const PINO_W7: &str = "DbzYtKH9eZ2ejQo2RyBxdY2PGWVhLjnhdw9ja5pFFRno";
 const PINO_W8: &str = "DRJ9FZj2xNjSnydfSMiagn49JcXDmDfqV8miH4hhfZds";
 const PINO_W9: &str = "AUfBb1dJr392vYKgKMqEYJoWTTjeE6GsWctcrir6mg3";
+const PINO_W10: &str = "BHTGrn49Rw47mahPPhupKShja328C13ibSve4b2gAF9E";
 const TOKEN_2022_PROGRAM: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
 const TOKEN_PROGRAM: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 
@@ -97,6 +99,7 @@ fn load_programs(svm: &mut LiteSVM) {
         (ANCHOR_W7, "target/deploy/anchor_w7_hook.so"),
         (ANCHOR_W8, "target/deploy/anchor_w8_amm.so"),
         (ANCHOR_W9, "target/deploy/anchor_w9_refresh.so"),
+        (ANCHOR_W10, "target/deploy/anchor_w10_vault.so"),
         (PINO_W0, "target/deploy/pinocchio_w0_noop.so"),
         (PINO_W1, "target/deploy/pinocchio_w1_write.so"),
         (PINO_W2, "target/deploy/pinocchio_w2_spl_cpi.so"),
@@ -106,6 +109,7 @@ fn load_programs(svm: &mut LiteSVM) {
         (PINO_W7, "target/deploy/pinocchio_w7_hook.so"),
         (PINO_W8, "target/deploy/pinocchio_w8_amm.so"),
         (PINO_W9, "target/deploy/pinocchio_w9_refresh.so"),
+        (PINO_W10, "target/deploy/pinocchio_w10_vault.so"),
     ];
     for (id, path) in progs {
         svm.add_program_from_file(pk(id), path)
@@ -1116,6 +1120,196 @@ fn w9_pino(svm: &mut LiteSVM, payer: &Keypair, current_slot: u64) -> Result<u64,
     run_tx(svm, ix, &[payer])
 }
 
+// ---------- W10: vault deposit + share accounting (ERC4626 / Yearn shape) ----------
+//
+// Single-deposit NAV computation:
+//   [signer (s, ro), vault (mut zero-copy), user_position (mut zero-copy),
+//    user_underlying (mut), vault_underlying (mut), token_program (ro)]
+//
+// State layouts (matches programs/{anchor,pinocchio}-w10-vault/src/lib.rs):
+//   Vault         = { total_assets: u64, total_shares: u64 }                  — 16 bytes
+//   UserPosition  = { share_amount: u64, deposit_count: u64 }                  — 16 bytes
+//
+// Composition exercised: 2 mutable zero-copy + 2 SPL token accounts + 1 CPI.
+// Math: shares = (deposit × total_shares) / total_assets (with first-deposit
+// 1:1 special case). Initial vault seeded with total_assets=1_000_000,
+// total_shares=1_000_000 so the steady-state path is measured (not the
+// first-deposit short-circuit).
+
+const W10_VAULT_BODY: usize = 16;
+const W10_USER_POSITION_BODY: usize = 16;
+const W10_ANCHOR_VAULT: usize = 8 + W10_VAULT_BODY;
+const W10_ANCHOR_USER_POSITION: usize = 8 + W10_USER_POSITION_BODY;
+
+const W10_INITIAL_TOTAL_ASSETS: u64 = 1_000_000;
+const W10_INITIAL_TOTAL_SHARES: u64 = 1_000_000;
+const W10_USER_UNDERLYING_BALANCE: u64 = 10_000_000;
+
+fn make_w10_vault_body(total_assets: u64, total_shares: u64) -> Vec<u8> {
+    let mut body = vec![0u8; W10_VAULT_BODY];
+    body[0..8].copy_from_slice(&total_assets.to_le_bytes());
+    body[8..16].copy_from_slice(&total_shares.to_le_bytes());
+    body
+}
+
+fn make_w10_user_position_body() -> Vec<u8> {
+    vec![0u8; W10_USER_POSITION_BODY]
+}
+
+fn make_w10_anchor_vault(svm: &mut LiteSVM, owner: Pubkey) -> Pubkey {
+    let kp = Keypair::new();
+    let mut data = vec![0u8; W10_ANCHOR_VAULT];
+    data[..8].copy_from_slice(&anchor_acc_disc("Vault"));
+    data[8..].copy_from_slice(&make_w10_vault_body(
+        W10_INITIAL_TOTAL_ASSETS,
+        W10_INITIAL_TOTAL_SHARES,
+    ));
+    svm.set_account(
+        kp.pubkey(),
+        SolAccount {
+            lamports: 2_000_000,
+            data,
+            owner,
+            executable: false,
+            rent_epoch: 0,
+        },
+    )
+    .unwrap();
+    kp.pubkey()
+}
+
+fn make_w10_pino_vault(svm: &mut LiteSVM, owner: Pubkey) -> Pubkey {
+    let kp = Keypair::new();
+    svm.set_account(
+        kp.pubkey(),
+        SolAccount {
+            lamports: 1_500_000,
+            data: make_w10_vault_body(W10_INITIAL_TOTAL_ASSETS, W10_INITIAL_TOTAL_SHARES),
+            owner,
+            executable: false,
+            rent_epoch: 0,
+        },
+    )
+    .unwrap();
+    kp.pubkey()
+}
+
+fn make_w10_anchor_user_position(svm: &mut LiteSVM, owner: Pubkey) -> Pubkey {
+    let kp = Keypair::new();
+    let mut data = vec![0u8; W10_ANCHOR_USER_POSITION];
+    data[..8].copy_from_slice(&anchor_acc_disc("UserPosition"));
+    data[8..].copy_from_slice(&make_w10_user_position_body());
+    svm.set_account(
+        kp.pubkey(),
+        SolAccount {
+            lamports: 2_000_000,
+            data,
+            owner,
+            executable: false,
+            rent_epoch: 0,
+        },
+    )
+    .unwrap();
+    kp.pubkey()
+}
+
+fn make_w10_pino_user_position(svm: &mut LiteSVM, owner: Pubkey) -> Pubkey {
+    let kp = Keypair::new();
+    svm.set_account(
+        kp.pubkey(),
+        SolAccount {
+            lamports: 1_500_000,
+            data: make_w10_user_position_body(),
+            owner,
+            executable: false,
+            rent_epoch: 0,
+        },
+    )
+    .unwrap();
+    kp.pubkey()
+}
+
+fn setup_w10_tokens(svm: &mut LiteSVM, authority: Pubkey) -> (Pubkey, Pubkey) {
+    let mint = Keypair::new();
+    let token_pid = pk(TOKEN_PROGRAM);
+
+    svm.set_account(
+        mint.pubkey(),
+        SolAccount {
+            lamports: 1_500_000,
+            data: make_mint(&authority, 100_000_000, 6),
+            owner: token_pid,
+            executable: false,
+            rent_epoch: 0,
+        },
+    )
+    .unwrap();
+
+    let make_acc = |svm: &mut LiteSVM, amount: u64| -> Pubkey {
+        let kp = Keypair::new();
+        svm.set_account(
+            kp.pubkey(),
+            SolAccount {
+                lamports: 2_039_280,
+                data: make_token_account(&mint.pubkey(), &authority, amount),
+                owner: token_pid,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+        kp.pubkey()
+    };
+
+    let user_underlying = make_acc(svm, W10_USER_UNDERLYING_BALANCE);
+    let vault_underlying = make_acc(svm, W10_INITIAL_TOTAL_ASSETS);
+
+    (user_underlying, vault_underlying)
+}
+
+fn w10_anchor(svm: &mut LiteSVM, payer: &Keypair, deposit_amount: u64) -> Result<u64, String> {
+    let owner = pk(ANCHOR_W10);
+    let vault = make_w10_anchor_vault(svm, owner);
+    let user_position = make_w10_anchor_user_position(svm, owner);
+    let (user_underlying, vault_underlying) = setup_w10_tokens(svm, payer.pubkey());
+    let mut data = anchor_ix_disc("deposit").to_vec();
+    data.extend_from_slice(&deposit_amount.to_le_bytes());
+    let ix = Instruction {
+        program_id: owner,
+        accounts: vec![
+            AccountMeta::new_readonly(payer.pubkey(), true),
+            AccountMeta::new(vault, false),
+            AccountMeta::new(user_position, false),
+            AccountMeta::new(user_underlying, false),
+            AccountMeta::new(vault_underlying, false),
+            AccountMeta::new_readonly(pk(TOKEN_PROGRAM), false),
+        ],
+        data,
+    };
+    run_tx(svm, ix, &[payer])
+}
+
+fn w10_pino(svm: &mut LiteSVM, payer: &Keypair, deposit_amount: u64) -> Result<u64, String> {
+    let owner = pk(PINO_W10);
+    let vault = make_w10_pino_vault(svm, owner);
+    let user_position = make_w10_pino_user_position(svm, owner);
+    let (user_underlying, vault_underlying) = setup_w10_tokens(svm, payer.pubkey());
+    let data = deposit_amount.to_le_bytes().to_vec();
+    let ix = Instruction {
+        program_id: owner,
+        accounts: vec![
+            AccountMeta::new_readonly(payer.pubkey(), true),
+            AccountMeta::new(vault, false),
+            AccountMeta::new(user_position, false),
+            AccountMeta::new(user_underlying, false),
+            AccountMeta::new(vault_underlying, false),
+            AccountMeta::new_readonly(pk(TOKEN_PROGRAM), false),
+        ],
+        data,
+    };
+    run_tx(svm, ix, &[payer])
+}
+
 // ---------- driver ----------
 
 fn report(name: &str, a: Result<u64, String>, p: Result<u64, String>) {
@@ -1198,6 +1392,11 @@ fn main() {
     let a = w9_anchor(&mut svm, &payer, 1_000);
     let p = w9_pino(&mut svm, &payer, 1_000);
     report("W9 lending refresh", a, p);
+
+    // W10: vault deposit (NAV-weighted share computation)
+    let a = w10_anchor(&mut svm, &payer, 1_000);
+    let p = w10_pino(&mut svm, &payer, 1_000);
+    report("W10 vault deposit", a, p);
 
     println!();
 }
