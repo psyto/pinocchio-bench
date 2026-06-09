@@ -33,6 +33,11 @@ This repo re-measures the gap on the **current toolchain** (`anchor-cli 0.32.1`,
 | W5  | Matching engine FIFO append into existing tick | Active |
 | W6  | 3-hop SPL Token CPI chain (Jupiter-route shape)| Active |
 | W7  | Token-2022 TransferChecked invoking no-op hook | Active |
+| W8  | AMM constant-product swap (Raydium/Meteora)    | Active |
+| W9  | Lending refresh, 5 mut accounts (Kamino shape) | Active |
+| W10 | Vault deposit + NAV share accounting (Yearn/ERC4626) | Active |
+| W11 | Pyth-style oracle publish (1 mut + EMA math, no CPI) | Active |
+| W12 | Drift-style perp open_position (3 mut + 2 SPL + 1 CPI) | Active |
 
 ## Results
 
@@ -49,6 +54,11 @@ Measured 2026-06-06 on Anchor 0.32.1 / Pinocchio 0.11.1 / Solana 3.1.14 / litesv
 | W5 match engine FIFO append    |     1,383 |          208 |  85.0%  |
 | W6 3-hop SPL Token CPI chain   |    10,045 |        3,431 |  65.8%  |
 | W7 Token-2022 + transfer hook  |    12,352 |        8,169 |  33.9%  |
+| W8 AMM constant-product swap   |     7,757 |        2,802 |  63.9%  |
+| W9 lending refresh (5 mut)     |     2,956 |          685 |  76.8%  |
+| W10 vault deposit (NAV)        |     4,815 |        1,484 |  69.2%  |
+| W11 oracle publish (EMA)       |       924 |           57 |  93.8%  |
+| W12 perp open_position         |     5,361 |        1,699 |  68.3%  |
 
 **The gap follows two scaling laws, both linear:**
 
