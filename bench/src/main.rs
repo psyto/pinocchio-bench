@@ -19,6 +19,7 @@ const ANCHOR_W7: &str = "3uVUZLsj8y7fPNpE6WksSjsZuLxUspL3pxKKeqbsnSQr";
 const ANCHOR_W8: &str = "Hf89Tqt9FdVdAEsgt3UkmzriXRLPFYqeYE4hHJaSzTjN";
 const ANCHOR_W9: &str = "AhdfeAdeXFQNoqfg6XMHU59bi5cty5CZS7b92A1ERZK9";
 const ANCHOR_W10: &str = "2N5cmNMVnqrQDWaKE2oP92bVDwMvGNW69k7mpQfyyiMh";
+const ANCHOR_W11: &str = "1PA7z3xmC4WdLzc5frbUSuDynRNPPvPPyJNFPdFSmu5";
 const PINO_W0: &str = "4PE1tkJYXdvEXNFmqLfmu8kfLTUNVCQvMv6dGruZemfR";
 const PINO_W1: &str = "2jc9CyUhCbKjqL7WTwWc3pysWzgXPN4ucbf6PUGnparY";
 const PINO_W2: &str = "64QzbP8eZ47r61Hvjj9JL1yJW7uj7QLvbo8txCKh7pEK";
@@ -29,6 +30,7 @@ const PINO_W7: &str = "DbzYtKH9eZ2ejQo2RyBxdY2PGWVhLjnhdw9ja5pFFRno";
 const PINO_W8: &str = "DRJ9FZj2xNjSnydfSMiagn49JcXDmDfqV8miH4hhfZds";
 const PINO_W9: &str = "AUfBb1dJr392vYKgKMqEYJoWTTjeE6GsWctcrir6mg3";
 const PINO_W10: &str = "BHTGrn49Rw47mahPPhupKShja328C13ibSve4b2gAF9E";
+const PINO_W11: &str = "3gRh1jN8h8qE2pWbXMAMcPV1cGmYNffXejx4rRBXEYZH";
 const TOKEN_2022_PROGRAM: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
 const TOKEN_PROGRAM: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 
@@ -100,6 +102,7 @@ fn load_programs(svm: &mut LiteSVM) {
         (ANCHOR_W8, "target/deploy/anchor_w8_amm.so"),
         (ANCHOR_W9, "target/deploy/anchor_w9_refresh.so"),
         (ANCHOR_W10, "target/deploy/anchor_w10_vault.so"),
+        (ANCHOR_W11, "target/deploy/anchor_w11_oracle.so"),
         (PINO_W0, "target/deploy/pinocchio_w0_noop.so"),
         (PINO_W1, "target/deploy/pinocchio_w1_write.so"),
         (PINO_W2, "target/deploy/pinocchio_w2_spl_cpi.so"),
@@ -110,6 +113,7 @@ fn load_programs(svm: &mut LiteSVM) {
         (PINO_W8, "target/deploy/pinocchio_w8_amm.so"),
         (PINO_W9, "target/deploy/pinocchio_w9_refresh.so"),
         (PINO_W10, "target/deploy/pinocchio_w10_vault.so"),
+        (PINO_W11, "target/deploy/pinocchio_w11_oracle.so"),
     ];
     for (id, path) in progs {
         svm.add_program_from_file(pk(id), path)
@@ -1310,6 +1314,98 @@ fn w10_pino(svm: &mut LiteSVM, payer: &Keypair, deposit_amount: u64) -> Result<u
     run_tx(svm, ix, &[payer])
 }
 
+// ---------- W11: Pyth-style oracle pull (publish_price) ----------
+//
+// 1 mut zero-copy PriceFeed account + signer. Light EMA math (α = 1/8).
+// No CPI. Models high-frequency oracle publishers where the per-call
+// framework overhead is the dominant cost.
+//
+// State (matches programs/{anchor,pinocchio}-w11-oracle):
+//   PriceFeed = { price: u64, conf: u64, ema_price: u64,
+//                 last_slot: u64, publish_count: u64 }              — 40 bytes
+
+const W11_FEED_BODY: usize = 40;
+const W11_ANCHOR_FEED: usize = 8 + W11_FEED_BODY;
+
+fn make_w11_anchor_feed(svm: &mut LiteSVM, owner: Pubkey) -> Pubkey {
+    let kp = Keypair::new();
+    let mut data = vec![0u8; W11_ANCHOR_FEED];
+    data[..8].copy_from_slice(&anchor_acc_disc("PriceFeed"));
+    svm.set_account(
+        kp.pubkey(),
+        SolAccount {
+            lamports: 2_000_000,
+            data,
+            owner,
+            executable: false,
+            rent_epoch: 0,
+        },
+    )
+    .unwrap();
+    kp.pubkey()
+}
+
+fn make_w11_pino_feed(svm: &mut LiteSVM, owner: Pubkey) -> Pubkey {
+    let kp = Keypair::new();
+    svm.set_account(
+        kp.pubkey(),
+        SolAccount {
+            lamports: 1_500_000,
+            data: vec![0u8; W11_FEED_BODY],
+            owner,
+            executable: false,
+            rent_epoch: 0,
+        },
+    )
+    .unwrap();
+    kp.pubkey()
+}
+
+fn w11_anchor(
+    svm: &mut LiteSVM,
+    payer: &Keypair,
+    new_price: u64,
+    new_conf: u64,
+    new_slot: u64,
+) -> Result<u64, String> {
+    let feed = make_w11_anchor_feed(svm, pk(ANCHOR_W11));
+    let mut data = anchor_ix_disc("publish_price").to_vec();
+    data.extend_from_slice(&new_price.to_le_bytes());
+    data.extend_from_slice(&new_conf.to_le_bytes());
+    data.extend_from_slice(&new_slot.to_le_bytes());
+    let ix = Instruction {
+        program_id: pk(ANCHOR_W11),
+        accounts: vec![
+            AccountMeta::new_readonly(payer.pubkey(), true),
+            AccountMeta::new(feed, false),
+        ],
+        data,
+    };
+    run_tx(svm, ix, &[payer])
+}
+
+fn w11_pino(
+    svm: &mut LiteSVM,
+    payer: &Keypair,
+    new_price: u64,
+    new_conf: u64,
+    new_slot: u64,
+) -> Result<u64, String> {
+    let feed = make_w11_pino_feed(svm, pk(PINO_W11));
+    let mut data = new_price.to_le_bytes().to_vec();
+    data.extend_from_slice(&new_conf.to_le_bytes());
+    data.extend_from_slice(&new_slot.to_le_bytes());
+    let ix = Instruction {
+        program_id: pk(PINO_W11),
+        accounts: vec![
+            AccountMeta::new_readonly(payer.pubkey(), true),
+            AccountMeta::new(feed, false),
+        ],
+        data,
+    };
+    run_tx(svm, ix, &[payer])
+}
+
 // ---------- driver ----------
 
 fn report(name: &str, a: Result<u64, String>, p: Result<u64, String>) {
@@ -1397,6 +1493,11 @@ fn main() {
     let a = w10_anchor(&mut svm, &payer, 1_000);
     let p = w10_pino(&mut svm, &payer, 1_000);
     report("W10 vault deposit", a, p);
+
+    // W11: Pyth-style oracle publish (1 mut zero-copy, light EMA math)
+    let a = w11_anchor(&mut svm, &payer, 100_000_000, 50_000, 100);
+    let p = w11_pino(&mut svm, &payer, 100_000_000, 50_000, 100);
+    report("W11 oracle publish", a, p);
 
     println!();
 }

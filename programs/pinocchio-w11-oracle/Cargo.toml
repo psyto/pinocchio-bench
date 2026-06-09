@@ -1,0 +1,13 @@
+[package]
+name = "pinocchio-w11-oracle"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "pinocchio_w11_oracle"
+
+[dependencies]
+pinocchio = { workspace = true }
