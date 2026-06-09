@@ -15,6 +15,7 @@ PROGRAMS=(
     anchor-w9-refresh
     anchor-w10-vault
     anchor-w11-oracle
+    anchor-w12-perp
     pinocchio-w0-noop
     pinocchio-w1-write
     pinocchio-w2-spl-cpi
@@ -26,6 +27,7 @@ PROGRAMS=(
     pinocchio-w9-refresh
     pinocchio-w10-vault
     pinocchio-w11-oracle
+    pinocchio-w12-perp
 )
 
 for prog in "${PROGRAMS[@]}"; do

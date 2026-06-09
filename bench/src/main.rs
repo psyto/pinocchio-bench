@@ -20,6 +20,7 @@ const ANCHOR_W8: &str = "Hf89Tqt9FdVdAEsgt3UkmzriXRLPFYqeYE4hHJaSzTjN";
 const ANCHOR_W9: &str = "AhdfeAdeXFQNoqfg6XMHU59bi5cty5CZS7b92A1ERZK9";
 const ANCHOR_W10: &str = "2N5cmNMVnqrQDWaKE2oP92bVDwMvGNW69k7mpQfyyiMh";
 const ANCHOR_W11: &str = "1PA7z3xmC4WdLzc5frbUSuDynRNPPvPPyJNFPdFSmu5";
+const ANCHOR_W12: &str = "AUe7aMBwQieB84WLK2CpbySsiQdjU5E3D3xmtY4s1vNd";
 const PINO_W0: &str = "4PE1tkJYXdvEXNFmqLfmu8kfLTUNVCQvMv6dGruZemfR";
 const PINO_W1: &str = "2jc9CyUhCbKjqL7WTwWc3pysWzgXPN4ucbf6PUGnparY";
 const PINO_W2: &str = "64QzbP8eZ47r61Hvjj9JL1yJW7uj7QLvbo8txCKh7pEK";
@@ -31,6 +32,7 @@ const PINO_W8: &str = "DRJ9FZj2xNjSnydfSMiagn49JcXDmDfqV8miH4hhfZds";
 const PINO_W9: &str = "AUfBb1dJr392vYKgKMqEYJoWTTjeE6GsWctcrir6mg3";
 const PINO_W10: &str = "BHTGrn49Rw47mahPPhupKShja328C13ibSve4b2gAF9E";
 const PINO_W11: &str = "3gRh1jN8h8qE2pWbXMAMcPV1cGmYNffXejx4rRBXEYZH";
+const PINO_W12: &str = "FF8a4bNwL6CP2bbd295kMCAut3UtK8Fiw2KkhhHaRbCR";
 const TOKEN_2022_PROGRAM: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
 const TOKEN_PROGRAM: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 
@@ -103,6 +105,7 @@ fn load_programs(svm: &mut LiteSVM) {
         (ANCHOR_W9, "target/deploy/anchor_w9_refresh.so"),
         (ANCHOR_W10, "target/deploy/anchor_w10_vault.so"),
         (ANCHOR_W11, "target/deploy/anchor_w11_oracle.so"),
+        (ANCHOR_W12, "target/deploy/anchor_w12_perp.so"),
         (PINO_W0, "target/deploy/pinocchio_w0_noop.so"),
         (PINO_W1, "target/deploy/pinocchio_w1_write.so"),
         (PINO_W2, "target/deploy/pinocchio_w2_spl_cpi.so"),
@@ -114,6 +117,7 @@ fn load_programs(svm: &mut LiteSVM) {
         (PINO_W9, "target/deploy/pinocchio_w9_refresh.so"),
         (PINO_W10, "target/deploy/pinocchio_w10_vault.so"),
         (PINO_W11, "target/deploy/pinocchio_w11_oracle.so"),
+        (PINO_W12, "target/deploy/pinocchio_w12_perp.so"),
     ];
     for (id, path) in progs {
         svm.add_program_from_file(pk(id), path)
@@ -1406,6 +1410,266 @@ fn w11_pino(
     run_tx(svm, ix, &[payer])
 }
 
+// ---------- W12: perp open_position (Drift-shape) ----------
+//
+// Largest combined surface in the bench: 3 mut zero-copy + 2 SPL token
+// + 1 CPI + non-trivial math (margin + fee + oracle propagation).
+//
+// Accounts (both sides):
+//   [signer (s, ro), user (mut zc), perp_market (mut zc), oracle (mut zc),
+//    user_token (mut SPL), fee_vault (mut SPL), token_program (ro)]
+//
+// State layouts (matches programs/{anchor,pinocchio}-w12-perp):
+//   UserPerp     = { collateral u64, position_size u64,
+//                    entry_price u64, last_update_slot u64 }          — 32 bytes
+//   PerpMarket   = { open_interest u64, mark_price u64,
+//                    max_leverage_bps u32, fee_bps u32 }              — 24 bytes
+//   MarketOracle = { mark_price u64, last_update_slot u64 }           — 16 bytes
+
+const W12_USER_BODY: usize = 32;
+const W12_MARKET_BODY: usize = 24;
+const W12_ORACLE_BODY: usize = 16;
+const W12_ANCHOR_USER: usize = 8 + W12_USER_BODY;
+const W12_ANCHOR_MARKET: usize = 8 + W12_MARKET_BODY;
+const W12_ANCHOR_ORACLE: usize = 8 + W12_ORACLE_BODY;
+
+const W12_INITIAL_COLLATERAL: u64 = 10_000_000;
+const W12_INITIAL_MARK_PRICE: u64 = 1_000;
+const W12_INITIAL_MAX_LEVERAGE_BPS: u32 = 100_000; // 10x
+const W12_INITIAL_FEE_BPS: u32 = 10; // 0.1%
+const W12_USER_TOKEN_BALANCE: u64 = 10_000_000;
+
+fn make_w12_user_body(collateral: u64) -> Vec<u8> {
+    let mut body = vec![0u8; W12_USER_BODY];
+    body[0..8].copy_from_slice(&collateral.to_le_bytes());
+    body
+}
+
+fn make_w12_market_body(mark_price: u64, max_leverage_bps: u32, fee_bps: u32) -> Vec<u8> {
+    let mut body = vec![0u8; W12_MARKET_BODY];
+    // open_interest = 0
+    body[8..16].copy_from_slice(&mark_price.to_le_bytes());
+    body[16..20].copy_from_slice(&max_leverage_bps.to_le_bytes());
+    body[20..24].copy_from_slice(&fee_bps.to_le_bytes());
+    body
+}
+
+fn make_w12_oracle_body(mark_price: u64) -> Vec<u8> {
+    let mut body = vec![0u8; W12_ORACLE_BODY];
+    body[0..8].copy_from_slice(&mark_price.to_le_bytes());
+    body
+}
+
+fn make_w12_anchor_user(svm: &mut LiteSVM, owner: Pubkey) -> Pubkey {
+    let kp = Keypair::new();
+    let mut data = vec![0u8; W12_ANCHOR_USER];
+    data[..8].copy_from_slice(&anchor_acc_disc("UserPerp"));
+    data[8..].copy_from_slice(&make_w12_user_body(W12_INITIAL_COLLATERAL));
+    svm.set_account(
+        kp.pubkey(),
+        SolAccount {
+            lamports: 2_000_000,
+            data,
+            owner,
+            executable: false,
+            rent_epoch: 0,
+        },
+    )
+    .unwrap();
+    kp.pubkey()
+}
+
+fn make_w12_pino_user(svm: &mut LiteSVM, owner: Pubkey) -> Pubkey {
+    let kp = Keypair::new();
+    svm.set_account(
+        kp.pubkey(),
+        SolAccount {
+            lamports: 1_500_000,
+            data: make_w12_user_body(W12_INITIAL_COLLATERAL),
+            owner,
+            executable: false,
+            rent_epoch: 0,
+        },
+    )
+    .unwrap();
+    kp.pubkey()
+}
+
+fn make_w12_anchor_market(svm: &mut LiteSVM, owner: Pubkey) -> Pubkey {
+    let kp = Keypair::new();
+    let mut data = vec![0u8; W12_ANCHOR_MARKET];
+    data[..8].copy_from_slice(&anchor_acc_disc("PerpMarket"));
+    data[8..].copy_from_slice(&make_w12_market_body(
+        W12_INITIAL_MARK_PRICE,
+        W12_INITIAL_MAX_LEVERAGE_BPS,
+        W12_INITIAL_FEE_BPS,
+    ));
+    svm.set_account(
+        kp.pubkey(),
+        SolAccount {
+            lamports: 2_000_000,
+            data,
+            owner,
+            executable: false,
+            rent_epoch: 0,
+        },
+    )
+    .unwrap();
+    kp.pubkey()
+}
+
+fn make_w12_pino_market(svm: &mut LiteSVM, owner: Pubkey) -> Pubkey {
+    let kp = Keypair::new();
+    svm.set_account(
+        kp.pubkey(),
+        SolAccount {
+            lamports: 1_500_000,
+            data: make_w12_market_body(
+                W12_INITIAL_MARK_PRICE,
+                W12_INITIAL_MAX_LEVERAGE_BPS,
+                W12_INITIAL_FEE_BPS,
+            ),
+            owner,
+            executable: false,
+            rent_epoch: 0,
+        },
+    )
+    .unwrap();
+    kp.pubkey()
+}
+
+fn make_w12_anchor_oracle(svm: &mut LiteSVM, owner: Pubkey) -> Pubkey {
+    let kp = Keypair::new();
+    let mut data = vec![0u8; W12_ANCHOR_ORACLE];
+    data[..8].copy_from_slice(&anchor_acc_disc("MarketOracle"));
+    data[8..].copy_from_slice(&make_w12_oracle_body(W12_INITIAL_MARK_PRICE));
+    svm.set_account(
+        kp.pubkey(),
+        SolAccount {
+            lamports: 2_000_000,
+            data,
+            owner,
+            executable: false,
+            rent_epoch: 0,
+        },
+    )
+    .unwrap();
+    kp.pubkey()
+}
+
+fn make_w12_pino_oracle(svm: &mut LiteSVM, owner: Pubkey) -> Pubkey {
+    let kp = Keypair::new();
+    svm.set_account(
+        kp.pubkey(),
+        SolAccount {
+            lamports: 1_500_000,
+            data: make_w12_oracle_body(W12_INITIAL_MARK_PRICE),
+            owner,
+            executable: false,
+            rent_epoch: 0,
+        },
+    )
+    .unwrap();
+    kp.pubkey()
+}
+
+fn setup_w12_tokens(svm: &mut LiteSVM, authority: Pubkey) -> (Pubkey, Pubkey) {
+    let mint = Keypair::new();
+    let token_pid = pk(TOKEN_PROGRAM);
+
+    svm.set_account(
+        mint.pubkey(),
+        SolAccount {
+            lamports: 1_500_000,
+            data: make_mint(&authority, 100_000_000, 6),
+            owner: token_pid,
+            executable: false,
+            rent_epoch: 0,
+        },
+    )
+    .unwrap();
+
+    let make_acc = |svm: &mut LiteSVM, amount: u64| -> Pubkey {
+        let kp = Keypair::new();
+        svm.set_account(
+            kp.pubkey(),
+            SolAccount {
+                lamports: 2_039_280,
+                data: make_token_account(&mint.pubkey(), &authority, amount),
+                owner: token_pid,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+        kp.pubkey()
+    };
+
+    let user_token = make_acc(svm, W12_USER_TOKEN_BALANCE);
+    let fee_vault = make_acc(svm, 0);
+
+    (user_token, fee_vault)
+}
+
+fn w12_anchor(
+    svm: &mut LiteSVM,
+    payer: &Keypair,
+    position_size: u64,
+    current_slot: u64,
+) -> Result<u64, String> {
+    let owner = pk(ANCHOR_W12);
+    let user = make_w12_anchor_user(svm, owner);
+    let market = make_w12_anchor_market(svm, owner);
+    let oracle = make_w12_anchor_oracle(svm, owner);
+    let (user_token, fee_vault) = setup_w12_tokens(svm, payer.pubkey());
+    let mut data = anchor_ix_disc("open_position").to_vec();
+    data.extend_from_slice(&position_size.to_le_bytes());
+    data.extend_from_slice(&current_slot.to_le_bytes());
+    let ix = Instruction {
+        program_id: owner,
+        accounts: vec![
+            AccountMeta::new_readonly(payer.pubkey(), true),
+            AccountMeta::new(user, false),
+            AccountMeta::new(market, false),
+            AccountMeta::new(oracle, false),
+            AccountMeta::new(user_token, false),
+            AccountMeta::new(fee_vault, false),
+            AccountMeta::new_readonly(pk(TOKEN_PROGRAM), false),
+        ],
+        data,
+    };
+    run_tx(svm, ix, &[payer])
+}
+
+fn w12_pino(
+    svm: &mut LiteSVM,
+    payer: &Keypair,
+    position_size: u64,
+    current_slot: u64,
+) -> Result<u64, String> {
+    let owner = pk(PINO_W12);
+    let user = make_w12_pino_user(svm, owner);
+    let market = make_w12_pino_market(svm, owner);
+    let oracle = make_w12_pino_oracle(svm, owner);
+    let (user_token, fee_vault) = setup_w12_tokens(svm, payer.pubkey());
+    let mut data = position_size.to_le_bytes().to_vec();
+    data.extend_from_slice(&current_slot.to_le_bytes());
+    let ix = Instruction {
+        program_id: owner,
+        accounts: vec![
+            AccountMeta::new_readonly(payer.pubkey(), true),
+            AccountMeta::new(user, false),
+            AccountMeta::new(market, false),
+            AccountMeta::new(oracle, false),
+            AccountMeta::new(user_token, false),
+            AccountMeta::new(fee_vault, false),
+            AccountMeta::new_readonly(pk(TOKEN_PROGRAM), false),
+        ],
+        data,
+    };
+    run_tx(svm, ix, &[payer])
+}
+
 // ---------- driver ----------
 
 fn report(name: &str, a: Result<u64, String>, p: Result<u64, String>) {
@@ -1498,6 +1762,12 @@ fn main() {
     let a = w11_anchor(&mut svm, &payer, 100_000_000, 50_000, 100);
     let p = w11_pino(&mut svm, &payer, 100_000_000, 50_000, 100);
     report("W11 oracle publish", a, p);
+
+    // W12: Drift-style perp open_position
+    // (3 mut zero-copy + 2 SPL + 1 CPI + margin/fee math)
+    let a = w12_anchor(&mut svm, &payer, 100_000, 200);
+    let p = w12_pino(&mut svm, &payer, 100_000, 200);
+    report("W12 perp open_pos", a, p);
 
     println!();
 }
