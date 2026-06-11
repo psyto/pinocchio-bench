@@ -117,13 +117,13 @@ Constraints locked before drafting:
 
 ---
 
-## Cross-cutting choices — still open
+## Cross-cutting choices — locked
 
-| Choice | Default | Where it surfaces |
+| Choice | Locked | Where it surfaces |
 |---|---|---|
-| Real source or stylized code in §3? | Real (W9 programs already public) | §3 |
-| Author byline (Hiro / psyto / handle)? | psyto, with email/issues contact | post header + §8 invitation line |
-| EN-only or EN+JA? | EN first, JA polish pass if Tier 2 outreach includes JP protocols | end of pipeline |
+| Real source or stylized code in §3? | Real W9 source from public bench | §3 |
+| Author byline (Hiro / psyto / handle)? | psyto, multi-channel (email + GH issues) | post header + §8 invitation line |
+| EN-only or EN+JA? | EN first, JA polish pass if Tier 2 outreach includes JP protocols (default — not formally locked) | end of pipeline |
 | Distribution timing — pair with blog 01? | Yes (ship 01+02 as 2-part series) | post-publish |
 
 ## Sequencing after outline approval
