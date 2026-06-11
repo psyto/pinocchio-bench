@@ -230,7 +230,11 @@ per-mut scaling. A follow-up W9b that splits ro/mut would quantify the ro-accoun
 — roughly: Anchor's `Account<'info, T>` on a ro account skips the exit-write hook (~80 CU/account
 expected discount) but still pays for ownership + discriminator validation.
 
-## What solinv would attach to W4/W5
+**Full case study:** [`blog/02-w9-lending-refresh.md`](blog/02-w9-lending-refresh.md) — annotated
+Anchor→Pinocchio diff, scaling-law extrapolation, equivalence-proof methodology, 6-invariant
+failure-mode table, and reproduction commands.
+
+## Invariants any production rewrite of W4/W5 must hold
 
 The matching-engine programs encode several invariants that a Pinocchio rewrite of a real DEX
 hot path would also need to preserve. These are exactly the targets an invariant-fuzzing
@@ -257,7 +261,7 @@ one of these 6 invariants holds under arbitrary call sequences.
 This is the wedge: the CU rewrite generates ROI on every call; the invariant suite makes the
 rewrite shippable.
 
-## What solinv would attach to W8
+## Invariants any production rewrite of W8 must hold
 
 A Pinocchio rewrite of a production AMM swap must preserve these invariants under any
 sequence of swaps from any direction:
@@ -284,7 +288,7 @@ single block. Dropping invariant 3 (slippage) is how MEV bots drain users. The C
 are real, but they only become a sellable engagement when the rewrite carries verified
 proofs for every one of these.
 
-## What solinv would attach to W9
+## Invariants any production rewrite of W9 must hold
 
 A Pinocchio rewrite of a production lending-refresh hot path must preserve these invariants:
 
@@ -313,7 +317,7 @@ spam refresh and inflate `cumulative_borrow_rate`. These are exactly the failure
 distinguish "CU benchmark" from "production rewrite," and they are why the equivalence-proof
 half of the wedge is load-bearing.
 
-## What solinv would attach to W10
+## Invariants any production rewrite of W10 must hold
 
 A Pinocchio rewrite of a production vault `deposit` hot path must preserve these invariants:
 
@@ -343,7 +347,7 @@ makes all subsequent deposits truncate to 0 shares. These are well-documented pr
 failure modes (ERC4626 first-depositor attack on Ethereum saw multiple exploits in 2022-2023);
 any Pinocchio rewrite of a Solana vault that drops these checks reproduces those failures.
 
-## What solinv would attach to W11
+## Invariants any production rewrite of W11 must hold
 
 A Pinocchio rewrite of an oracle publish path (Pyth pull, Switchboard push, custom feeds)
 must preserve these invariants:
@@ -376,7 +380,7 @@ operationally toxic. Oracle programs are the highest-frequency hot paths in DeFi
 Pinocchio rewrite compounds aggressively — but only if these invariants are preserved
 across the rewrite.
 
-## What solinv would attach to W12
+## Invariants any production rewrite of W12 must hold
 
 A Pinocchio rewrite of a perp `open_position` hot path must preserve these invariants:
 

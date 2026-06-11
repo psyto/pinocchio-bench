@@ -174,15 +174,14 @@ useless unless the protocol can also be told "and we proved your reserves never
 desync, your slippage protection still triggers, and the rewrite produces the
 same state as the original under arbitrary call sequences."
 
-That second half lives in a private invariant fuzzer
-([solinv](https://github.com/psyto/solinv), not yet open) which the author
-maintains alongside this benchmark. Solinv runs the rewrite against the original
-under randomized inputs and asserts byte-level state equivalence after every
-action, on top of protocol-specific invariants.
+That second half lives in differential testing — drive identical inputs through
+both Anchor and Pinocchio implementations in one SVM session, assert byte-level
+state equivalence after every action, and layer per-property assertions on top
+to catch behavior the byte-compare misses.
 
 As a concrete data point — for W4 (the matching-engine pair in this bench),
-running a differential harness that drives identical fuzz inputs through both
-the Anchor and Pinocchio implementations and asserts byte-equivalence of the
+running a differential harness that drives identical inputs through both the
+Anchor and Pinocchio implementations and asserts byte-equivalence of the
 resulting state:
 
 ```
@@ -193,9 +192,13 @@ resulting state:
                     under randomized input
 ```
 
-The numbers and methodology for that side will be the subject of a follow-up
-post. The point for the moment: the rewrite-and-prove pairing isn't an
-aspiration — it works on at least one bench primitive end-to-end today.
+The methodology — matched fixtures, same action through both, byte-compare,
+per-invariant assertions on each side — generalizes to any Anchor→Pinocchio
+rewrite. The full walkthrough on W9 lending refresh, including the 6 invariants
+a production rewrite must hold, lives in
+[`blog/02-w9-lending-refresh.md`](02-w9-lending-refresh.md). The point for the
+moment: the rewrite-and-prove pairing isn't an aspiration — it works on at
+least one bench primitive end-to-end today.
 
 ## What's next
 

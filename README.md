@@ -72,12 +72,16 @@ per transfer** of any token whose mint installs a transfer hook. For protocols w
 called millions of times per day, this maps directly to user costs.
 
 See [`RESULTS.md`](RESULTS.md) for the scaling analysis, Token-2022 hook extrapolation, and
-the 6 invariants a solinv-style fuzzer would attach to a real Pinocchio rewrite of the
-matching engine.
+the 6 invariants any production Pinocchio rewrite of the matching engine must hold.
 
 Binary sizes: Pinocchio `.so` files are 14–59× smaller than the Anchor equivalents.
 
 See [`RESULTS.md`](RESULTS.md) for methodology notes, caveats, and interpretation.
+
+## Case studies
+
+- [`blog/01-anchor-vs-pinocchio-measured.md`](blog/01-anchor-vs-pinocchio-measured.md) — bench-wide overview: the two scaling laws (per mutable account, per CPI hop), Token-2022 hook math, equivalence-proof methodology.
+- [`blog/02-w9-lending-refresh.md`](blog/02-w9-lending-refresh.md) — W9 lending refresh deep-dive: annotated Anchor→Pinocchio diff, 76.8% reduction broken down, 6-invariant equivalence-proof checklist.
 
 ## Reproducing
 
@@ -119,7 +123,7 @@ pinocchio-bench/
 ## Caveats
 
 - CU numbers are workload-shape-specific. A 60% gap on W0 does not mean a 60% gap on your protocol's hot path.
-- This benchmark does **not** measure safety — Pinocchio programs here use manual account validation; production Pinocchio code requires explicit invariant testing (see [solinv](https://github.com/psyto/solinv) — private).
+- This benchmark does **not** measure safety — Pinocchio programs here use manual account validation; production Pinocchio code requires explicit invariant testing (differential harness against the Anchor twin + per-property assertions on both sides; methodology in [`blog/02-w9-lending-refresh.md`](blog/02-w9-lending-refresh.md) §6).
 - We do not benchmark binary size, deploy cost, or upgrade rent — only execution CU.
 
 ## License

@@ -93,7 +93,7 @@ Constraints locked before drafting:
 
 ## §7 — 6 invariants → 6 failure modes (~250 words)
 
-- Table rephrased from `RESULTS.md` "What solinv would attach to W9" — drop tool-name framing. Re-cast as: "Invariants any production refresh rewrite must hold."
+- Table rephrased from `RESULTS.md` "Invariants any production rewrite of W9 must hold" section. Re-cast as: "Invariants any production refresh rewrite must hold."
 
   | # | Invariant | If dropped, you ship... |
   |---|---|---|
@@ -111,7 +111,7 @@ Constraints locked before drafting:
 - Pure technical close. No pricing, no CTA, no service framing.
 - **Reproduce the numbers**: `git clone https://github.com/psyto/pinocchio-bench && cd pinocchio-bench && cargo build-sbf -p anchor-w9-refresh -p pinocchio-w9-refresh && cargo run --release -p bench -- w9` (or whatever the actual bench CLI surface is — verify before drafting).
 - **Reproduce the equivalence-proof methodology**: §6 spells out the four steps; readers can wire their own differential harness against the same two `.so`s.
-- **Invariant list**: pointer to "What solinv would attach to W9" section of `RESULTS.md` (already public, drop "solinv" framing in the link text).
+- **Invariant list**: pointer to "Invariants any production rewrite of W9 must hold" section of `RESULTS.md`.
 - One-line invitation: "If you run this against your own refresh-shape ix and the numbers look different, file an issue — I want to know." No ask, no sales hook.
 - **Artifact:** one fenced code block (reproduce command).
 
