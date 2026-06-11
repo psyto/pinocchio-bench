@@ -6,7 +6,9 @@ Target file: `blog/02-w9-lending-refresh.md`
 
 Voice match: blog 01 (`01-anchor-vs-pinocchio-measured.md`) — data-forward, "what the numbers say" framing, no marketing voice.
 
-Total budget: ~2,550 words across 9 sections.
+Total budget: ~2,300 words across 8 sections.
+
+**Framing constraint:** this post is the **proof**, not the sales pitch. No pricing, no service shape, no pilot CTA — those convert trust before it's earned. Pricing + service framing get their own follow-on post (`03-pinocchio-rewrite-service.md`) once blog 02 has generated inbound interest that validates the proof works as a top-of-funnel artifact.
 
 Constraints locked before drafting:
 
@@ -104,22 +106,14 @@ Constraints locked before drafting:
 
 - **Artifact:** 6-row table.
 
-## §8 — Service shape (~250 words)
+## §8 — How to reproduce (~150 words)
 
-- First public price + time naming (Phase 2 outreach gate).
-- **Engagement**: 4–6 weeks, **$300–500K**.
-- **Deliverable bundle**: migration plan + Pinocchio rewrite + equivalence harness + 6-invariant attestation + deployment-ready binary + 30-day post-deploy support.
-- **Fit**: live mainnet protocol, hot-path ix with 3+ mutable account loads, $5M+ TVL ("CU savings have to compound to dollars").
-- **Not fit**: pre-launch protocols, teams with existing Pinocchio expertise (just hire), hot paths dominated by CPI (W2/W6 territory — different optimization stack).
-- **Artifact:** none.
-
-## §9 — Pilot CTA (~150 words)
-
-- 1–2 Tier 2 pilot slots: **half-price** + reference rights.
-- Constraints reaffirmed (mainnet, W9-shape, $5M+ TVL).
-- Honest scope: "This is the only outreach happening. No cold email, no sales team. If the post hit your problem, reply."
-- Contact: email + X handle.
-- **Artifact:** none.
+- Pure technical close. No pricing, no CTA, no service framing.
+- **Reproduce the numbers**: `git clone https://github.com/psyto/pinocchio-bench && cd pinocchio-bench && cargo build-sbf -p anchor-w9-refresh -p pinocchio-w9-refresh && cargo run --release -p bench -- w9` (or whatever the actual bench CLI surface is — verify before drafting).
+- **Reproduce the equivalence-proof methodology**: §6 spells out the four steps; readers can wire their own differential harness against the same two `.so`s.
+- **Invariant list**: pointer to "What solinv would attach to W9" section of `RESULTS.md` (already public, drop "solinv" framing in the link text).
+- One-line invitation: "If you run this against your own refresh-shape ix and the numbers look different, file an issue — I want to know." No ask, no sales hook.
+- **Artifact:** one fenced code block (reproduce command).
 
 ---
 
@@ -128,15 +122,14 @@ Constraints locked before drafting:
 | Choice | Default | Where it surfaces |
 |---|---|---|
 | Real source or stylized code in §3? | Real (W9 programs already public) | §3 |
-| Author byline (Hiro / psyto / handle)? | psyto, with email contact | §9 |
+| Author byline (Hiro / psyto / handle)? | psyto, with email/issues contact | post header + §8 invitation line |
 | EN-only or EN+JA? | EN first, JA polish pass if Tier 2 outreach includes JP protocols | end of pipeline |
 | Distribution timing — pair with blog 01? | Yes (ship 01+02 as 2-part series) | post-publish |
-| §8 price/time anchor — commit to $300–500K / 4–6 weeks publicly? | Yes — first public pricing anchor | §8 |
 
 ## Sequencing after outline approval
 
 1. CU chart — 1 hour, gives §4 its visual anchor
 2. Draft §3 + §4 (numeric core, lowest creative load)
 3. Draft §6 + §7 (load-bearing differentiator, longest review pass)
-4. Draft §1 + §2 + §5 + §8 + §9 (framing + trust + CTA)
+4. Draft §1 + §2 + §5 + §8 (framing + trust + reproduce)
 5. Self-review pass, then user review
