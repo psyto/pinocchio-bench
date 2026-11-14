@@ -74,7 +74,7 @@ called millions of times per day, this maps directly to user costs.
 See [`RESULTS.md`](RESULTS.md) for the scaling analysis, Token-2022 hook extrapolation, and
 the 6 invariants any production Pinocchio rewrite of the matching engine must hold.
 
-Binary sizes: Pinocchio `.so` files are 14–59× smaller than the Anchor equivalents.
+Binary sizes: Pinocchio `.so` files are about 16–59× smaller than the Anchor equivalents (15.6× for W8 up to 59.3× for W0; table in [`RESULTS.md`](RESULTS.md)).
 
 See [`RESULTS.md`](RESULTS.md) for methodology notes, caveats, and interpretation.
 
@@ -124,7 +124,7 @@ pinocchio-bench/
 
 - CU numbers are workload-shape-specific. A 60% gap on W0 does not mean a 60% gap on your protocol's hot path.
 - This benchmark does **not** measure safety — Pinocchio programs here use manual account validation; production Pinocchio code requires explicit invariant testing (differential harness against the Anchor twin + per-property assertions on both sides; methodology in [`blog/02-w9-lending-refresh.md`](blog/02-w9-lending-refresh.md) §6).
-- We do not benchmark binary size, deploy cost, or upgrade rent — only execution CU.
+- Binary size is reported as a side table (`.so` bytes); deploy cost and upgrade rent are not benchmarked.
 
 ## License
 
